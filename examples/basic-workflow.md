@@ -112,18 +112,21 @@ Approve this plan?" \
     "id": "sub-1",
     "title": "Create ThemeContext + Hook",
     "deps": [],
+    "complexity": "general",
     "spec": "Create src/contexts/ThemeContext.tsx with Provider, useTheme hook..."
   },
   {
     "id": "sub-2",
     "title": "Add ThemeToggle to Settings",
     "deps": ["sub-1"],
+    "complexity": "general",
     "spec": "Create src/components/ThemeToggle.tsx, integrate into Settings page..."
   },
   {
     "id": "sub-3",
     "title": "Apply dark: classes to components",
     "deps": ["sub-1"],
+    "complexity": "general",
     "spec": "Add Tailwind dark: variants to Settings, Sidebar, ProfileCard..."
   }
 ]
@@ -134,9 +137,12 @@ Approve this plan?" \
 ```bash
 orca worktree create --name "feature/dark-mode-20260726" --base main
 
+# All subtasks are "general" complexity → Agent 选择见 docs/agent-routing.md
+
 # Sub-1 dispatched first (no deps)
 orca orchestration task-create --task-title "Sub: ThemeContext" --deps '[]' ...
-orca orchestration dispatch --task "$SUB1_ID" --to worker-1 --inject &
+WORKER=$(select_worker "general")
+orca orchestration dispatch --task "$SUB1_ID" --to "$WORKER" --inject &
 
 # Sub-2 and Sub-3 dispatched after Sub-1 completes (deps satisfied)
 # (Orca orchestration respects deps ordering)
@@ -145,6 +151,8 @@ orca orchestration dispatch --task "$SUB1_ID" --to worker-1 --inject &
 ---
 
 ## Phase 5: Parallel Execution
+
+> Agent 路由见 `docs/agent-routing.md`
 
 **Worker 1** (ThemeContext):
 - Attempt 1: Produces ThemeContext.tsx ✅

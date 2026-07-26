@@ -237,10 +237,17 @@ export ORCA_WORKFLOW_LOG_LEVEL="${ORCA_WORKFLOW_LOG_LEVEL:-INFO}"
       "pr_review_poll_interval": 60000
     },
     "routing": {
+      "_note": "Agent 选型详见 docs/agent-routing.md。修改偏好只需编辑该文件，不要改这里。",
       "plan_agent_type": "Plan",
-      "review_agent_type": "claude",
-      "execution_agent_type": "general-purpose",
+      "review_agent_type": "pi",
+      "execution_agent_type": "claude",
+      "complex_execution_agent_type": "kimi",
+      "image_agent_type": "grok",
+      "fallback_agent_type": "pi",
       "default_model": "sonnet"
+    },
+    "terminals": {
+      "_note": "Worker 终端需预先创建并打标签。模型选择在 terminal create 时通过 --command 指定，dispatch 层不支持传 model。"
     },
     "merge": {
       "mode": "pr_only",
@@ -445,7 +452,7 @@ PLAN_WORKER=$(orca terminal list --json | jq -r '.result.terminals[] | select(.t
 # Dispatch
 orca orchestration dispatch --task "$PLAN_TASK" --to "$PLAN_WORKER" --inject --json
 
-# Create review gate (after worker produces artifact)
+# Create review gate — routed per routing.review_agent_type
 orca orchestration gate-create \
   --task "$PLAN_TASK" \
   --question "Review the technical plan. PASS or FAIL with reasons?" \
@@ -551,7 +558,7 @@ Each subtask must declare:
   "title": "Research & Analysis",
   "description": "Investigate the target codebase and identify integration points",
   "dependencies": [],
-  "agent_type": "Explore",
+  "complexity": "general",
   "expected_artifact": "research-notes.md",
   "review_criteria": [
     "All integration points identified",
@@ -561,6 +568,17 @@ Each subtask must declare:
   "timeout_ms": 600000
 }
 ```
+
+#### Agent Routing Rules
+
+> 📖 **Agent 选型详见 [`docs/agent-routing.md`](./docs/agent-routing.md)**。
+> 所有偏好集中在一个文件，修改时只需编辑它。
+
+`complexity` / `task_type` 字段决定 worker 匹配到哪个 `routing.*_agent_type` 配置项：
+- `"complex"` → `complex_execution_agent_type`
+- `"image"` → `image_agent_type`
+- `"general"` 或未设置 → `execution_agent_type`
+- 所有重试耗尽 → `fallback_agent_type`（兜底）
 
 ### 8.3 Process
 
@@ -589,7 +607,7 @@ for SUB in "${SUBTASK_IDS[@]}"; do
   echo "Created subtask: $TASK_ID ($SUB)"
 
   # Dispatch to worker (non-blocking — all dispatch in parallel)
-  WORKER=$(select_worker "${SUB_AGENT_TYPES[$SUB]}")
+  WORKER=$(select_worker "${SUB_COMPLEXITIES[$SUB]}")
   orca orchestration dispatch \
     --task "$TASK_ID" \
     --to "$WORKER" \
@@ -605,13 +623,48 @@ wait  # All dispatches fired
 ### 8.4 Worker Selection Logic
 
 ```bash
+# Agent 偏好定义在 docs/agent-routing.md，通过环境变量注入到此函数
 select_worker() {
-  local agent_type="${1:-general-purpose}"
-  # Prefer worker with matching agent_type tag, fall back to first available
+  local task_type="${1:-general}"
+  local agent_type
+
+  case "$task_type" in
+    complex) agent_type="${ORCA_WORKFLOW_COMPLEX_EXECUTION_AGENT}" ;;
+    image)   agent_type="${ORCA_WORKFLOW_IMAGE_AGENT}" ;;
+    *)       agent_type="${ORCA_WORKFLOW_EXECUTION_AGENT}" ;;
+  esac
+
+  # 匹配对应标签的 worker 终端，无匹配则取第一个可用
   orca terminal list --json | jq -r --arg type "$agent_type" '
     [.result.terminals[] | select(.tags[]? == $type)] | if length > 0 then .[0].handle
     else .result.terminals[0].handle end
   '
+}
+```
+
+#### 报错兜底逻辑
+
+通用任务失败后按优先级链重试（Agent 列表由 `docs/agent-routing.md` 定义）：
+
+```bash
+retry_with_fallback() {
+  local task_id="$1"
+  # 从环境变量读取兜底链，格式: "agent1,agent2,agent3"
+  IFS=',' read -ra agents <<< "${ORCA_WORKFLOW_FALLBACK_CHAIN:-}"
+
+  for agent in "${agents[@]}"; do
+    WORKER=$(select_worker_by_tag "$agent")
+    orca orchestration dispatch --task "$task_id" --to "$WORKER" --inject --json
+    wait_for_worker "$task_id"
+
+    if [[ "$(get_task_verdict "$task_id")" == "PASS" ]]; then
+      return 0
+    fi
+    echo "⚠️ $agent failed, trying next..."
+  done
+
+  echo "❌ All agents exhausted for $task_id"
+  return 1
 }
 ```
 
