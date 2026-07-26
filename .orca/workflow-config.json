@@ -1,0 +1,36 @@
+{
+  "workflow": {
+    "version": "2.0.0",
+    "limits": {
+      "max_review_rounds": 3,
+      "max_escalate_count": 2,
+      "max_user_confirm_rounds": 3,
+      "max_subtask_retries": 3,
+      "max_global_retries": 2,
+      "max_autofix_attempts": 2,
+      "max_clarification_rounds": 5
+    },
+    "timeouts_ms": {
+      "worker_execution": 1800000,
+      "human_response": 0,
+      "pr_review_poll_interval": 60000
+    },
+    "routing": {
+      "plan_agent_type": "Plan",
+      "review_agent_type": "claude",
+      "execution_agent_type": "general-purpose",
+      "default_model": "sonnet"
+    },
+    "merge": {
+      "mode": "pr_only",
+      "auto_merge_on_approval": false,
+      "require_ci_pass": true,
+      "delete_branch_after_merge": true
+    },
+    "observability": {
+      "log_level": "INFO",
+      "state_file": ".orca/workflow-state.json",
+      "trace_all_gates": true
+    }
+  }
+}
