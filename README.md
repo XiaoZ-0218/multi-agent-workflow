@@ -54,8 +54,22 @@ cp SKILL.md /path/to/your/project/
 # 1. Navigate to your project worktree
 cd /path/to/project
 
-# 2. Start the workflow (the coordinator will guide you)
-orca orchestration run --skill multi-agent-workflow
+# 2. Write your task to a markdown spec file
+cat > /tmp/task.md <<'EOF'
+# <Title>
+
+## Goal
+...
+
+## Scope
+...
+
+## Acceptance Criteria
+...
+EOF
+
+# 3. Start the workflow (the coordinator will guide you through each phase)
+orca orchestration run --spec /tmp/task.md
 ```
 
 The coordinator agent will prompt you through each phase — starting with requirements gathering.
@@ -129,8 +143,11 @@ See [`SKILL.md#4-configuration`](./SKILL.md#4-configuration) for the full config
 multi-agent-workflow/
 ├── SKILL.md                          # The skill definition (this is what Orca loads)
 ├── README.md                         # This file
+├── CHANGELOG.md                      # Version history
+├── LICENSE                           # MIT license
 ├── docs/
-│   └── workflow.md                   # Mermaid flowchart (full state diagram)
+│   ├── workflow.md                   # Mermaid flowchart (full state diagram)
+│   └── agent-routing.md              # Single source of truth for agent routing
 ├── examples/
 │   └── basic-workflow.md             # Annotated walkthrough of a complete run
 ├── .orca/

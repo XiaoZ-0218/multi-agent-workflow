@@ -73,13 +73,21 @@ else
 fi
 
 # 5. Worker terminals
+#    SKILL.md §3.1 marks this as FATAL by default, but solo / dry-run runs are
+#    legitimately valid without a worker pool. Set ORCA_WORKFLOW_STRICT_PREREQ=true
+#    to enforce the FATAL policy; default is WARN to keep local smoke-tests working.
 echo "--- Worker Terminals ---"
+STRICT_PREREQ="${ORCA_WORKFLOW_STRICT_PREREQ:-false}"
 if command -v orca &>/dev/null; then
   WORKER_COUNT=$(orca terminal list --json 2>/dev/null | jq '[.result.terminals[]? | select(.type == "worker" or .tags[]? == "worker")] | length' 2>/dev/null || echo "0")
   if [ "$WORKER_COUNT" -ge 1 ]; then
     pass "$WORKER_COUNT worker terminal(s) available"
   else
-    warn "No worker terminals found. Create one: orca terminal create --type worker"
+    if [ "$STRICT_PREREQ" = "true" ]; then
+      fail "No worker terminals found. Create one: orca terminal create --type worker (set ORCA_WORKFLOW_STRICT_PREREQ=false to allow solo runs)"
+    else
+      warn "No worker terminals found. Solo/dry-run mode still works. Create one for parallel execution: orca terminal create --type worker"
+    fi
   fi
 else
   warn "Cannot check worker terminals (Orca not available)"

@@ -1,6 +1,6 @@
 ---
 name: multi-agent-workflow
-version: 2.0.0
+version: 2.0.1
 author: orca-workflow-team
 tags: [orchestration, multi-agent, workflow, supervisor, cicd]
 description: >
@@ -18,7 +18,7 @@ applyTo: "**/*"
 
 # Multi-Agent Orchestration Workflow — Production Skill
 
-> **Version**: 2.0.0 &ensp;|&ensp; **Runtime**: Orca IDE ≥ 1.x &ensp;|&ensp; **License**: MIT
+> **Version**: 2.0.1 &ensp;|&ensp; **Runtime**: Orca IDE ≥ 1.x &ensp;|&ensp; **License**: MIT
 >
 > Reference flowchart: [`docs/workflow.md`](./docs/workflow.md)
 
@@ -178,11 +178,20 @@ applyTo: "**/*"
 orca status --json | jq -e '.ok and .result.app.running and .result.runtime.reachable' \
   || { echo "FATAL: Orca is not running or unreachable"; exit 1; }
 
-# 2. Verify at least one worker terminal is available
+# 2. Verify at least one worker terminal is available.
+#    Default policy (matches scripts/check-prerequisites.sh):
+#    - ORCA_WORKFLOW_STRICT_PREREQ=true  → FATAL: workflow cannot run parallel
+#      subtasks without a worker. Production / CI should set this.
+#    - ORCA_WORKFLOW_STRICT_PREREQ=false → WARN: the coordinator falls back to
+#      acting as the sole worker. Default for local dev and smoke tests.
 WORKER_COUNT=$(orca terminal list --json | jq '[.result.terminals[] | select(.type == "worker")] | length')
 if [ "$WORKER_COUNT" -lt 1 ]; then
-  echo "FATAL: No worker terminals available. Create one with: orca terminal create --type worker"
-  exit 1
+  if [ "${ORCA_WORKFLOW_STRICT_PREREQ:-false}" = "true" ]; then
+    echo "FATAL: No worker terminals available. Create one with: orca terminal create --type worker"
+    exit 1
+  else
+    echo "WARN: No worker terminals available — solo mode (coordinator = sole worker)."
+  fi
 fi
 
 # 3. Verify worktree is clean (no uncommitted changes blocking branch creation)
@@ -201,15 +210,38 @@ git diff --quiet && git diff --cached --quiet \
 
 ### 3.3 Environment Variables
 
+> 完整列表及优先级参见 [`docs/agent-routing.md`](./docs/agent-routing.md#环境变量覆盖)。
+
 ```bash
+# === 流程限制（覆盖 workflow.limits.*）===
 export ORCA_WORKFLOW_MAX_REVIEW_ROUNDS=${ORCA_WORKFLOW_MAX_REVIEW_ROUNDS:-3}
 export ORCA_WORKFLOW_MAX_ESCALATE=${ORCA_WORKFLOW_MAX_ESCALATE:-2}
 export ORCA_WORKFLOW_MAX_USER_CONFIRM=${ORCA_WORKFLOW_MAX_USER_CONFIRM:-3}
 export ORCA_WORKFLOW_MAX_SUB_RETRY=${ORCA_WORKFLOW_MAX_SUB_RETRY:-3}
 export ORCA_WORKFLOW_MAX_GLOBAL_RETRY=${ORCA_WORKFLOW_MAX_GLOBAL_RETRY:-2}
 export ORCA_WORKFLOW_MAX_AUTOFIX=${ORCA_WORKFLOW_MAX_AUTOFIX:-2}
+
+# === 路径与日志 ===
 export ORCA_WORKFLOW_STATE_FILE="${ORCA_WORKFLOW_STATE_FILE:-.orca/workflow-state.json}"
 export ORCA_WORKFLOW_LOG_LEVEL="${ORCA_WORKFLOW_LOG_LEVEL:-INFO}"
+
+# === 行为开关 ===
+# true  → check-prerequisites.sh 缺失 worker 时返回 FAIL（生产 / CI 推荐）
+# false → 允许 solo / dry-run（coordinator 自身作为唯一 worker；本地与冒烟测试默认）
+export ORCA_WORKFLOW_STRICT_PREREQ="${ORCA_WORKFLOW_STRICT_PREREQ:-false}"
+
+# === Agent 路由（覆盖 docs/agent-routing.md）===
+export ORCA_WORKFLOW_PLAN_AGENT="${ORCA_WORKFLOW_PLAN_AGENT:-Plan}"
+export ORCA_WORKFLOW_REVIEW_AGENT="${ORCA_WORKFLOW_REVIEW_AGENT:-pi}"
+export ORCA_WORKFLOW_EXECUTION_AGENT="${ORCA_WORKFLOW_EXECUTION_AGENT:-claude}"
+export ORCA_WORKFLOW_COMPLEX_EXECUTION_AGENT="${ORCA_WORKFLOW_COMPLEX_EXECUTION_AGENT:-kimi}"
+export ORCA_WORKFLOW_IMAGE_AGENT="${ORCA_WORKFLOW_IMAGE_AGENT:-grok}"
+export ORCA_WORKFLOW_FALLBACK_AGENT="${ORCA_WORKFLOW_FALLBACK_AGENT:-pi}"
+# 通用任务失败后的兜底链（逗号分隔，优先级从高到低）
+export ORCA_WORKFLOW_FALLBACK_CHAIN="${ORCA_WORKFLOW_FALLBACK_CHAIN:-grok,pi}"
+
+# === 模拟 ===
+export ORCA_WORKFLOW_DRY_RUN="${ORCA_WORKFLOW_DRY_RUN:-false}"
 ```
 
 ---
@@ -218,10 +250,15 @@ export ORCA_WORKFLOW_LOG_LEVEL="${ORCA_WORKFLOW_LOG_LEVEL:-INFO}"
 
 ### 4.1 Tunable Parameters
 
+> 📖 **Agent 选型（routing）详见 [`docs/agent-routing.md`](./docs/agent-routing.md)** —— 单一起源。
+> 修改偏好只改 `agent-routing.md` 与对应的 `ORCA_WORKFLOW_*` 环境变量；不要把 agent 名称硬编码进任务 spec。
+>
+> 下方配置中 `routing.*_agent_type` 仅作冷启动默认值；运行时实际生效的是 `agent-routing.md` + env override。
+
 ```json
 {
   "workflow": {
-    "version": "2.0.0",
+    "version": "2.0.1",
     "limits": {
       "max_review_rounds": 3,
       "max_escalate_count": 2,
@@ -237,7 +274,7 @@ export ORCA_WORKFLOW_LOG_LEVEL="${ORCA_WORKFLOW_LOG_LEVEL:-INFO}"
       "pr_review_poll_interval": 60000
     },
     "routing": {
-      "_note": "Agent 选型详见 docs/agent-routing.md。修改偏好只需编辑该文件，不要改这里。",
+      "_note": "见 docs/agent-routing.md（单一起源）。",
       "plan_agent_type": "Plan",
       "review_agent_type": "pi",
       "execution_agent_type": "claude",
@@ -496,7 +533,12 @@ while confirm_round < MAX_USER_CONFIRM:
         f"✅ Technical plan has passed internal review.\n\n"
         f"Summary:\n{plan_summary}\n\n"
         f"Do you approve this plan?",
-        options=["Approve — begin execution", "Revise — provide feedback", "Abort — cancel the task"]
+        options=[
+            "Approve — begin execution",
+            "Revise — provide feedback",
+            "Reduce scope — keep partial work only (no PR / no worktree)",
+            "Abort — cancel the task"
+        ]
     )
 
     if response == "Approve":
@@ -508,6 +550,16 @@ while confirm_round < MAX_USER_CONFIRM:
         if response == "Revise":
             # Collect feedback, return to Phase 2 with reset review counter
             transition to PLANNING (with user_feedback)
+        elif response == "Reduce scope":
+            # User explicitly limits side-effects. Record scope_reduction in state,
+            # skip Phase 4 worktree creation, ship artifacts in-place, mark
+            # delivery_mode=degraded even when all subtasks pass.
+            set_scope_reduction_flag({
+                "skip_worktree": true,
+                "skip_pr": true,
+                "reason": user_reason
+            })
+            transition to DISPATCHING (in-place, no worktree)
         elif response == "Abort":
             transition to TERMINATED (Terminate2)
     else:
@@ -524,6 +576,23 @@ while confirm_round < MAX_USER_CONFIRM:
         else:
             transition to TERMINATED (Terminate2)
 ```
+
+#### 7.2.1 Scope-Reduction Contract
+
+When the user chooses **"Reduce scope"** at Phase 3, the workflow records
+`scope_reduction` in the state file and applies these skip rules:
+
+| Phase | Default | Scope-Reduced |
+|-------|---------|---------------|
+| 4 (Dispatch) | Create `feature/*` worktree | **No new worktree** — operate on the active worktree |
+| 5 (Execute) | Workers write into worktree | Workers write into the active worktree |
+| 6 (Decide) | `delivery_mode: full` when all pass | `delivery_mode: degraded` (state-only, no PR) |
+| 7 (Merge) | `gh pr create` + lifecycle gate | **Skipped** — record `skip_reason: user scope reduction` |
+| 8 (Cleanup) | Remove worktree + branch | `disposition: SKIPPED`, no destructive ops |
+
+This is distinct from the **Degraded Delivery** contract in §10.4, which is
+triggered by subtask *failures*. Scope-reduction is a user-declared outcome
+that applies even when every subtask passes.
 
 ### 7.3 Output
 
@@ -596,6 +665,7 @@ else
 fi
 
 # Step 2: Create orchestration tasks for each subtask
+DISPATCH_FAILED=()
 for SUB in "${SUBTASK_IDS[@]}"; do
   TASK_ID=$(orca orchestration task-create \
     --task-title "Sub: ${SUB_TITLES[$SUB]}" \
@@ -608,16 +678,24 @@ for SUB in "${SUBTASK_IDS[@]}"; do
 
   # Dispatch to worker (non-blocking — all dispatch in parallel)
   WORKER=$(select_worker "${SUB_COMPLEXITIES[$SUB]}")
-  orca orchestration dispatch \
+  if ! orca orchestration dispatch \
     --task "$TASK_ID" \
     --to "$WORKER" \
     --inject \
-    --json &
+    --json > "/tmp/dispatch-${TASK_ID}.json" 2>&1 & then
+    DISPATCH_FAILED+=("$SUB")
+  fi
 
   SUBTASK_MAP["$SUB"]="$TASK_ID"
 done
 
 wait  # All dispatches fired
+
+if [ "${#DISPATCH_FAILED[@]}" -gt 0 ]; then
+  echo "⚠️  Dispatch failed for: ${DISPATCH_FAILED[*]}"
+  # Surface to coordinator for Phase 6 decision; do NOT abort silently.
+  echo "DISPATCH_FAILED=${DISPATCH_FAILED[*]}" >> "$STATE_FILE"
+fi
 ```
 
 ### 8.4 Worker Selection Logic
@@ -1307,10 +1385,29 @@ After each phase, validate:
 ```bash
 # Test the full workflow with a trivial task
 export ORCA_WORKFLOW_DRY_RUN=true
+export ORCA_WORKFLOW_STRICT_PREREQ=false   # allow solo runs in CI
 
-# Simulate a simple request
-echo "Write a hello-world script in Python" | \
-  orca orchestration run --skill multi-agent-workflow
+# Write the spec to a temp file (any markdown describing the task)
+cat > /tmp/spec.md <<'EOF'
+# Hello-World Smoke Test
+
+## Goal
+Write a hello-world script in Python that prints "Hello, World!".
+
+## Scope
+- Single file `hello.py`
+- No tests required (smoke test only)
+
+## Constraints
+- Python 3.10+
+- No external dependencies
+
+## Acceptance Criteria
+- `python hello.py` exits 0 with stdout "Hello, World!"
+EOF
+
+# Start the coordinator with the spec file
+orca orchestration run --spec /tmp/spec.md
 
 # Verify state file was written correctly
 jq '.phases | keys' .orca/workflow-state.json
@@ -1330,10 +1427,21 @@ cd /path/to/project
 # 2. Verify prerequisites
 ./scripts/check-prerequisites.sh
 
-# 3. Start the coordinator
-orca orchestration run --skill multi-agent-workflow
+# 3. Write the spec to a markdown file
+cat > /tmp/task.md <<'EOF'
+# <Title>
+## Goal
+...
+## Scope
+...
+## Acceptance Criteria
+...
+EOF
 
-# The coordinator will prompt for the task description via Phase 1
+# 4. Start the coordinator with the spec file
+orca orchestration run --spec /tmp/task.md
+
+# The coordinator will prompt for any clarifications via Phase 1
 ```
 
 ### 17.2 Resuming a Parked Workflow
@@ -1411,7 +1519,7 @@ echo '{"status":"CANCELLED","cancelled_at":"'$(date -Iseconds)'"}' >> .orca/work
 | `gate-create` | 2, 6, 7 | Create a blocking decision gate |
 | `gate-resolve` | 2, 6, 7 | Resolve a pending gate |
 | `ask` | 1, 2, 3, 6, 7, 8 | Blocking question to coordinator (human) |
-| `run` | All | Start the coordinator event loop |
+| `run --spec <file>` | All | Start the coordinator event loop with a markdown spec |
 | `run-stop` | Recovery | Gracefully stop a running workflow |
 | `reset` | Recovery | Reset orchestration state |
 
@@ -1448,4 +1556,4 @@ See [`.orca/workflow-state.schema.json`](./.orca/workflow-state.schema.json) for
 
 ---
 
-> **Next Steps**: Run `orca orchestration run --skill multi-agent-workflow` in any Orca-managed worktree to start. The coordinator will guide you through each phase. For first-time setup, see [Prerequisites](#3-prerequisites--environment).
+> **Next Steps**: Write your task to a markdown spec file and run `orca orchestration run --spec /path/to/spec.md` in any Orca-managed worktree. The coordinator will guide you through each phase. For first-time setup, see [Prerequisites](#3-prerequisites--environment).

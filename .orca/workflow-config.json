@@ -1,6 +1,6 @@
 {
   "workflow": {
-    "version": "2.0.0",
+    "version": "2.0.1",
     "limits": {
       "max_review_rounds": 3,
       "max_escalate_count": 2,
@@ -16,10 +16,17 @@
       "pr_review_poll_interval": 60000
     },
     "routing": {
+      "_note": "Agent 选型详见 docs/agent-routing.md（单一起源）。本文件保留默认值便于冷启动和 CI 校验，运行时该文件被 docs/agent-routing.md 的偏好覆盖。",
       "plan_agent_type": "Plan",
-      "review_agent_type": "claude",
-      "execution_agent_type": "general-purpose",
+      "review_agent_type": "pi",
+      "execution_agent_type": "claude",
+      "complex_execution_agent_type": "kimi",
+      "image_agent_type": "grok",
+      "fallback_agent_type": "pi",
       "default_model": "sonnet"
+    },
+    "terminals": {
+      "_note": "Worker 终端需预先创建并打标签。模型选择在 terminal create 时通过 --command 指定，dispatch 层不支持传 model。"
     },
     "merge": {
       "mode": "pr_only",

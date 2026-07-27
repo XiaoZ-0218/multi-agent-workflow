@@ -1,0 +1,14 @@
+# Orca workflow runtime state (regenerated on each run)
+/.orca/workflow-state.json
+.orca/parked/
+
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Build artifacts
+node_modules/
+__pycache__/
+*.pyc
