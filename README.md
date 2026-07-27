@@ -1,8 +1,8 @@
 # Multi-Agent Orchestration Workflow
 
-> **Production-grade multi-agent pipeline for Orca IDE** — take a user request from requirements through to merged PR, with parallel execution, review gates, human-in-the-loop fallbacks, and full audit trail.
+> **Production-grade multi-agent pipeline for Orca IDE** — take a user request from requirements through to a merged PR, with wave-parallel execution, cross-agent review, human-in-the-loop fallbacks, and full audit trail.
 
-[![Skill Version](https://img.shields.io/badge/skill-v2.1.0-blue)](./SKILL.md)
+[![Skill Version](https://img.shields.io/badge/skill-v2.2.0-blue)](./SKILL.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Orca](https://img.shields.io/badge/runtime-Orca%20IDE-orange)](https://orca.app)
 
@@ -13,21 +13,23 @@
 This skill implements a **complete 8-phase workflow** that coordinates multiple AI agents to deliver complex software tasks:
 
 ```
-User Request → Clarify → Plan → Review → Confirm → Execute (parallel) → Decide → PR → Merge → Archive
+User Request → Clarify → Plan → Review → Confirm → Execute (wave-parallel) → Decide → Rebase + Tests + Integration Review → PR → Cleanup
 ```
 
 ### Key Features
 
-- **🔄 Full Lifecycle**: Requirements → Plan → Execute → Review → Merge → Cleanup
-- **🌳 Per-Sub-Task Worktrees (v2.1.0)**: each feature/fix gets its own branch + worktree — no cross-task contention, clean per-task diffs, individually mergeable PRs
-- **🔗 Stacked Branches (v2.1.0)**: dependent sub-tasks branch off parent tips (not `main`), preserving parallelism; auto-rebase onto `main` when the parent PR merges
-- **🆕 Fresh Agent Per Round (v2.1.0)**: implementation, cross-review, and fix each run in a **fresh terminal** — no Agent context reuse, no carry-over bias
-- **🧑‍⚖️ Cross-Agent Review**: reviews use a different Agent (`pi`) than implementation (`claude`/`kimi`), per `docs/agent-routing.md`
-- **🛡️ Hard Cycle Caps**: Every loop has a maximum iteration count — no infinite retries
-- **👤 Human-in-the-Loop**: Escalation at plan-review and per-sub-task merge-conflict boundaries only
-- **📉 Degraded Delivery**: When retries exhaust, completed sub-tasks ship independently; failed sub-tasks get per-sub-task parked manifests
-- **🔍 Full Audit Trail**: Every decision, gate, terminal spawn, and PR transition is logged to `.orca/workflow-state.json` (with `subtask_id` scope since v2.1.0)
-- **🔒 PR-Only Merge**: No direct `git merge` — each sub-task integrates through its own PR; dependent PRs flip base to `main` via the §11.8 stacked-PR rebase hook
+- **🔄 Full Lifecycle**: Requirements → Plan → Execute → Review → Integration Review → Merge → Cleanup
+- **🌳 One Worktree Per Feature (v2.2.0)**: the whole feature lives on a single `feature/<slug>` branch in one worktree based on `origin/main`. The coordinator never leaves `main` (no `git checkout`, ever), and the run ends with exactly **one PR**
+- **🧩 Owns-Based Parallel Safety (v2.2.0)**: every sub-task declares the files/dirs it `owns`; same-wave sub-tasks must have **disjoint ownership**, validated during plan review. Parallel-write safety comes from disjoint write sets, not filesystem isolation
+- **🌊 Wave Dispatch (v2.2.0)**: dependencies map to serial waves — a sub-task is dispatched only after all its parents pass, and sees their committed code naturally in the shared worktree
+- **🆕 Fresh Agent Per Round**: implementation, cross-review, and fix each run in a **fresh terminal** — no Agent context reuse, no carry-over bias
+- **🧑‍⚖️ Scoped Cross-Agent Review**: reviews use a different Agent (`pi`) than implementation (`claude`/`kimi`), per `docs/agent-routing.md`, and each review is scoped to the sub-task's own commit range (`base_sha..HEAD`) within its `owns`
+- **🔬 Integration Review (v2.2.0)**: a fresh review agent audits the *whole* feature — plan, per-sub-task verdicts, test results, full diff vs `origin/main` — before the PR is opened
+- **🛡️ Hard Cycle Caps**: every loop has a maximum iteration count — no infinite retries
+- **👤 Human-in-the-Loop**: escalation at plan-review, decision, and merge boundaries; **only a human merges the PR**
+- **📉 Degrade-or-Park**: failed sub-tasks get their commit ranges surgically reverted in the feature worktree (clean because `owns` are disjoint) for a degraded release; if the revert is unclean, the whole feature is parked with a recovery manifest
+- **🔍 Full Audit Trail**: every decision, terminal spawn, verdict, and PR transition is logged to `.orca/workflow-state.json`
+- **🔒 Single PR, Human-Only Merge**: no direct `git merge` — one PR per feature, monitored by the coordinator, merged by a human
 
 ---
 
@@ -54,56 +56,53 @@ cp SKILL.md /path/to/your/project/
 ### Usage
 
 ```bash
-# 1. Navigate to your project worktree
+# 1. Navigate to your project checkout — it must be Orca-managed.
+#    The coordinator stays on the main branch for the entire run.
 cd /path/to/project
 
-# 2. Write your task to a markdown spec file
-cat > /tmp/task.md <<'EOF'
-# <Title>
+# 2. Run the pre-flight checks
+/path/to/multi-agent-workflow/scripts/check-prerequisites.sh
 
-## Goal
-...
-
-## Scope
-...
-
-## Acceptance Criteria
-...
-EOF
-
-# 3. Start the workflow (the coordinator will guide you through each phase)
-orca orchestration run --spec /tmp/task.md
+# 3. Open the checkout in Orca and describe the task to the coordinator
+#    agent in the main checkout's chat, e.g.:
+#    "Add a /health endpoint to the API, with tests."
 ```
 
-The coordinator agent will prompt you through each phase — starting with requirements gathering.
+The skill drives every `orca` command itself — worktree creation, wave dispatch, reviews, the PR — and prompts you at each human checkpoint, starting with requirements gathering.
+
+> Aside: Orca's native `orca orchestration run --spec <text>` coordinator loop exists as an alternative entrypoint, but the chat-driven flow above is the recommended path.
 
 ---
 
-## Architecture (v2.1.0)
+## Architecture (v2.2.0)
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                     COORDINATOR (This Agent)                      │
-│  Phase 1 → Phase 2 → Phase 3 → Phase 4 (per-sub-task worktrees)  │
-│                                      │                            │
-│                              ┌───────┼─────────┐                  │
-│                              │  Sub-1 wt+br  Sub-2 wt+br         │
-│                              │  base=main    base=sub-1           │
-│                              │  ↓            ↓                   │
-│                              │  exec₀        exec₀                │
-│                              │  review₁      review₁              │
-│                              │  fix₂         done                 │
-│                              │  review₃                            │
-│                              └───────┬─────────┘                  │
-│  Phase 6 ← Collect (all verdicts) ┘                              │
-│  Phase 7 (per-sub-task PR, topo order) → §11.8 stacked rebase    │
-│  Phase 8 (per-sub-task cleanup, reverse-topo) → Done              │
+│                COORDINATOR (This Agent — always on main)         │
+│  Phase 1 Gather → Phase 2 Plan+Review → Phase 3 Confirm          │
+│  Phase 4: create ONE feature worktree (feature/<slug> off        │
+│           origin/main) → decompose DAG → dispatch wave 0         │
+│                              │                                   │
+│        ┌─────────────────────▼────────────────────────┐          │
+│        │          FEATURE WORKTREE (shared)           │          │
+│        │  Wave 0: sub-A (owns: api/**) ∥ sub-B (ui/**)│          │
+│        │  Wave 1: sub-C  ← runs after deps PASS       │          │
+│        │  per sub-task, per round, FRESH terminals:   │          │
+│        │    exec (small commits) → cross-review       │          │
+│        │    (base_sha..HEAD, within owns) → fix → …   │          │
+│        └─────────────────────┬────────────────────────┘          │
+│  Phase 6 ← collect verdicts: retry / degrade / park              │
+│  Phase 7: rebase origin/main → tests → INTEGRATION               │
+│           REVIEW (fresh agent, whole-feature diff) → ONE PR      │
+│           → human reviews & merges the PR                        │
+│  Phase 8: delete branch, remove worktree, close terminals        │
+│           (or park: .orca/parked/<feature-slug>.md)              │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
 ### State Machine
 
-8 phases with per-sub-task subgraph under `DISPATCHING` / `EXECUTING` / `MERGING` / `CLEANING`. Terminal exits: plan non-convergence, user rejection, sub-task failure (per-sub-task PARKED is recoverable).
+8 phases with a per-wave sub-task subgraph under `DISPATCHING` / `EXECUTING` and a whole-feature subgraph under `MERGING` / `CLEANING`. Terminal exits: plan non-convergence, user rejection/abort, feature failure (PARKED is recoverable).
 
 See [`docs/workflow.md`](./docs/workflow.md) for the full Mermaid diagram.
 
@@ -113,14 +112,14 @@ See [`docs/workflow.md`](./docs/workflow.md) for the full Mermaid diagram.
 
 | # | Phase | What Happens | Key Command |
 |---|-------|-------------|-------------|
-| 1 | **Gathering** | Clarify requirements with the user | `orca orchestration ask` |
-| 2 | **Planning** | Generate technical plan, review it (max 3 rounds) | `task-create` + `dispatch` + `gate-create` |
-| 3 | **Confirming** | User approves the plan (max 3 rounds) | `orca orchestration ask` |
-| 4 | **Dispatching** | **Per-sub-task**: create wt+branch (stacked on parent or main), spawn fresh execution terminal | `worktree create` + `terminal create` + `task-create` + `dispatch` |
-| 5 | **Executing** | **Per-round cross-review**: round > 0 spawns fresh fix + review terminals | `terminal create` + `dispatch` + `terminal close` |
-| 6 | **Deciding** | Collect all per-sub-task verdicts, decide retry / degrade / escalate | `task-list` + `ask` |
-| 7 | **Merging** | **Per-sub-task PR** in topo order; §11.8 stacked-PR rebase hook flips dependent PRs to `main` after parent merges | `gh pr create` + `gh pr edit --base` + `gate-create` |
-| 8 | **Cleaning** | **Per-sub-task** reverse-topo cleanup: delete branch, remove worktree, close `keep_terminal`, write per-sub-task park manifest if needed | `worktree remove` + `terminal close` |
+| 1 | **Gathering** | Clarify requirements with the user via the coordinator's native channel (≤5 rounds) | native user interaction |
+| 2 | **Planning** | Generate technical plan; a separate review task returns its verdict via `worker_done` (max 3 rounds + 2 escalations) | `task-create` + `dispatch --inject` |
+| 3 | **Confirming** | User approves the plan (max 3 rounds; Abort stops immediately) | native user interaction |
+| 4 | **Dispatching** | Create the ONE feature worktree + branch off `origin/main`, compute waves from the DAG, dispatch wave 0 | `worktree create --base-branch origin/main` + `terminal create` + `task-create` + `dispatch --inject` |
+| 5 | **Executing** | Per-round fresh terminals: exec/fix agents commit in small commits; cross-review is scoped to `base_sha..HEAD` within the sub-task's `owns` | `terminal create` + `dispatch --inject` + `check --wait` |
+| 6 | **Deciding** | Collect verdicts; user chooses retry (max 2) / degrade (revert failed commit ranges) / abort | `task-list` + native user interaction |
+| 7 | **Merging** | Rebase onto `origin/main` (autofix ≤2), run tests, **integration review** by a fresh agent (≤2 rounds), then ONE PR; human merges | `git rebase` + `gh pr create` + `gh pr view` |
+| 8 | **Cleaning** | Per-feature cleanup: delete branch, remove worktree, close `keep_terminal`; or write `.orca/parked/<feature-slug>.md` | `worktree rm` + `terminal close` |
 
 ---
 
@@ -129,21 +128,18 @@ See [`docs/workflow.md`](./docs/workflow.md) for the full Mermaid diagram.
 All parameters are tunable via environment variables:
 
 ```bash
-export ORCA_WORKFLOW_MAX_REVIEW_ROUNDS=3      # Plan review retries
-export ORCA_WORKFLOW_MAX_ESCALATE=2           # Human escalations before terminate
+export ORCA_WORKFLOW_MAX_REVIEW_ROUNDS=3       # Plan review retries
+export ORCA_WORKFLOW_MAX_ESCALATE=2            # Human escalations before terminate
 export ORCA_WORKFLOW_MAX_USER_CONFIRM=3        # User confirmation retries
-export ORCA_WORKFLOW_MAX_SUB_RETRY=3           # Per-sub-task cross-review rounds
-export ORCA_WORKFLOW_MAX_GLOBAL_RETRY=2        # Full-batch retry rounds
-export ORCA_WORKFLOW_MAX_AUTOFIX=2             # Auto conflict-resolution attempts (per-sub-task, in §11.4 / §11.8)
-
-# v2.1.0 — branch strategy & per-role terminals
-export ORCA_WORKFLOW_BRANCH_STRATEGY=stacked              # stacked | serial (default stacked)
-export ORCA_WORKFLOW_BRANCH_TEMPLATE='feature/{workflow_slug}/{sub_slug}-{timestamp}'
-export ORCA_WORKFLOW_WORKTREE_PATH_TEMPLATE='../{workflow_slug}-{sub_slug}'
-export ORCA_WORKFLOW_MAX_TERMINALS_PER_SUBTASK=8          # hard cap on review+fix terminal count
+export ORCA_WORKFLOW_MAX_SUB_RETRY=3           # Per-sub-task execution/fix retries
+export ORCA_WORKFLOW_MAX_GLOBAL_RETRY=2        # Failed-batch retry rounds
+export ORCA_WORKFLOW_MAX_AUTOFIX=2             # Auto conflict-resolution attempts during rebase
+export ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW=2  # Integration review rounds (new in v2.2.0)
+export ORCA_WORKFLOW_STRICT_PREREQ=false       # Treat missing prereqs as fatal when true
+export ORCA_WORKFLOW_DRY_RUN=false             # Plan-only mode, no dispatches
 ```
 
-See [`SKILL.md#4-configuration`](./SKILL.md#4-configuration) for the full configuration reference.
+See [`SKILL.md`](./SKILL.md) for the full configuration reference.
 
 ---
 
@@ -173,7 +169,7 @@ multi-agent-workflow/
 
 | Document | Description |
 |----------|-------------|
-| [`SKILL.md`](./SKILL.md) | Full skill definition and API reference (18 sections) |
+| [`SKILL.md`](./SKILL.md) | Full skill definition and API reference |
 | [`docs/workflow.md`](./docs/workflow.md) | Complete Mermaid state diagram |
 | [`examples/basic-workflow.md`](./examples/basic-workflow.md) | Step-by-step walkthrough |
 
@@ -188,17 +184,17 @@ multi-agent-workflow/
 cat .orca/workflow-state.json | jq '.current_phase'
 
 # Recover based on phase
-# (see SKILL.md §17.3 for detailed recovery procedures)
+# (see SKILL.md for detailed recovery procedures)
 ```
 
 ### After Parking
 
 ```bash
-# Find parked task
+# Each parked feature leaves one manifest
 ls .orca/parked/
 
 # Read recovery instructions
-cat .orca/parked/feature-*.md
+cat .orca/parked/<feature-slug>.md
 ```
 
 ---

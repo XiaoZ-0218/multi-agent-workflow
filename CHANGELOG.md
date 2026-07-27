@@ -5,6 +5,97 @@ All notable changes to the **multi-agent-workflow** skill are documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — 2026-07-27
+
+### Changed (BREAKING)
+- **One worktree per feature**: the v2.1.0 per-sub-task worktrees are
+  gone. A run now creates exactly one `feature/<slug>` branch + worktree
+  based on `origin/main`; all sub-tasks execute inside it and integrate
+  as **one PR** at the end. The coordinator stays on the main branch for
+  the entire run — it never runs `git checkout`, and its only git ops in
+  its own checkout are `git fetch origin` (optionally
+  `git pull --ff-only`).
+- **Stacked branches, draft PRs, and per-sub-task PRs removed**: the
+  §11.8 stacked-PR rebase hook, the `branch_strategy` block, and the
+  branch/worktree-path templates are all deleted. Dependencies now mean
+  **wave-based serial dispatch**: a sub-task is dispatched only after
+  every parent has verdict=PASS, and it sees the parents' committed
+  code naturally in the shared worktree.
+- **Degraded delivery is now surgical**: the coordinator reverts each
+  failed sub-task's commit range in the feature worktree (clean because
+  `owns` are disjoint); if the revert is unclean, the whole feature is
+  parked instead of shipping partial work.
+- **Parked manifest renamed**: one `.orca/parked/<feature-slug>.md` per
+  parked feature (was one per sub-task), recording branch, worktree
+  path, PR url, reason, and recovery steps.
+- **State-file top level reshaped**: new `feature_slug`, `worktree{}`,
+  `pr{}`, and `integration_review{}` blocks; the v2.1.0 legacy aggregate
+  `branch` / `pr_url` fields are dropped. `current_phase` /
+  `current_state` enums now include `INIT`, and `pr.state` no longer
+  has a `DRAFT` value.
+- **Scope-reduction option removed**: the v2.0.1 Phase 3 "reduce scope"
+  path allowed parallel writes into the coordinator's main checkout and
+  is unsafe. Users reduce scope via Revise instead.
+
+### Added
+- **`owns` field on every sub-task** (file/dir ownership globs).
+  Parallel-write safety comes from disjoint ownership rather than
+  filesystem isolation; plan review now validates that every sub-task
+  declares `owns` and that same-wave sub-tasks are disjoint.
+- **Per-dispatch `base_sha` + scoped review**: the coordinator records
+  the feature-branch HEAD at each dispatch, and the cross-review agent
+  reviews only the `<base_sha>..HEAD` changes within the sub-task's
+  `owns`.
+- **Integration review phase** (Phase 7): a fresh review agent audits
+  the whole feature — plan, per-sub-task verdicts, test results, and
+  `git diff origin/main...HEAD` — before the PR is created. Bounded by
+  the new `ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW` (default 2).
+- **Pre-flight check for the coordinator checkout**:
+  `scripts/check-prerequisites.sh` now verifies `orca worktree current`
+  so a run never starts from a checkout Orca does not manage.
+
+### Fixed
+- **CLI surface corrected everywhere** to the real Orca commands:
+  `worktree create --base-branch` (no positional path arg, no `--base`),
+  `worktree rm` ("worktree remove" does not exist),
+  `terminal close --terminal` (no `--handle`), no `--tags` on
+  `terminal create` (agent identity is carried by the title prefix and
+  the coordinator's state record), `dispatch` has no `--spec` (new
+  instructions require a NEW task), and blocking waits use
+  `check --wait` in a rolling loop.
+- **Phase 3 Abort off-by-one**: Abort now terminates immediately at any
+  confirmation round instead of surviving one extra round.
+- **Phase 6 retry off-by-one**: the global retry budget is checked
+  before incrementing, so `ORCA_WORKFLOW_MAX_GLOBAL_RETRY=2` allows at
+  most 2 retries (not 3).
+- **PR-monitor gate spam**: the merge monitor now polls
+  `gh pr view --json state,mergeStateStatus` every 60s and never calls
+  `gate-create` inside the poll loop.
+- **Autofix success-verification inversion**: a rebase autofix now
+  counts as SUCCESS only when the rebase actually completed AND zero
+  `^UU` conflict markers remain (previously the check was inverted,
+  letting conflicted trees through).
+- **Cancel runbook corrupting the state file**: all state-file updates
+  now use jq atomic writes (write tmp file, then `mv`); JSON is never
+  appended with `>>`.
+- **Phase 8 no longer checks out main**: cleanup runs from the
+  coordinator's own checkout; the only git op afterwards is
+  `git fetch origin`.
+- **Security section** no longer claims git-worktree filesystem
+  sandboxing — sub-tasks share one worktree, so that claim was false.
+- **Phase 8 now deletes the local feature branch**: verified in the
+  v2.2.0 smoke run that `orca worktree rm --force` removes the worktree
+  but leaves the local branch behind; cleanup now runs
+  `git branch -D <branch>` from the coordinator's checkout (`-D`, not
+  `-d`, because a squash-merged PR's local tip is not an ancestor of
+  main).
+- **`worker_done` verdict placement**: the preamble contract (§8.5) now
+  requires the verdict in BOTH the message subject and the payload —
+  smoke-run finding: some agents only write the subject. The
+  coordinator reads `payload.verdict` first and falls back to the
+  subject prefix.
+  Write safety is the `owns` contract plus the review gates.
+
 ## [2.1.0] — 2026-07-27
 
 ### Changed (BREAKING for state-file consumers — additive at the schema level)
