@@ -131,7 +131,7 @@
                     "handle":      { "type": "string" },
                     "role":        { "type": "string", "enum": ["execution", "review", "fix", "fallback", "autofix", "pr-fix", "integration-review"] },
                     "round":       { "type": "integer", "minimum": 0 },
-                    "agent_type":  { "type": "string", "description": "Resolved Agent name (claude / kimi / grok / pi / Plan)" },
+                    "agent_type":  { "type": "string", "description": "Resolved Agent name (claude / kimi / grok / pi)" },
                     "status":      { "type": "string", "enum": ["dispatched", "running", "completed", "failed", "closed"] },
                     "verdict":     { "type": "string", "enum": ["PASS", "FAIL", null] },
                     "spawned_at":  { "type": "string", "format": "date-time" },

@@ -313,7 +313,7 @@ export ORCA_WORKFLOW_STRICT_PREREQ="${ORCA_WORKFLOW_STRICT_PREREQ:-false}"
 export ORCA_WORKFLOW_DRY_RUN="${ORCA_WORKFLOW_DRY_RUN:-false}"
 
 # === Agent routing (override docs/agent-routing.md — same names as v2.1.0) ===
-export ORCA_WORKFLOW_PLAN_AGENT="${ORCA_WORKFLOW_PLAN_AGENT:-Plan}"
+export ORCA_WORKFLOW_PLAN_AGENT="${ORCA_WORKFLOW_PLAN_AGENT:-claude}"   # fallback: pi
 export ORCA_WORKFLOW_REVIEW_AGENT="${ORCA_WORKFLOW_REVIEW_AGENT:-pi}"
 export ORCA_WORKFLOW_EXECUTION_AGENT="${ORCA_WORKFLOW_EXECUTION_AGENT:-claude}"
 export ORCA_WORKFLOW_COMPLEX_EXECUTION_AGENT="${ORCA_WORKFLOW_COMPLEX_EXECUTION_AGENT:-kimi}"
@@ -363,7 +363,7 @@ export ORCA_WORKFLOW_FALLBACK_CHAIN="${ORCA_WORKFLOW_FALLBACK_CHAIN:-grok,pi}"
     },
     "routing": {
       "_note": "Single source of truth: docs/agent-routing.md. These are cold-start defaults only.",
-      "plan_agent_type": "Plan",
+      "plan_agent_type": "claude",
       "review_agent_type": "pi",
       "execution_agent_type": "claude",
       "complex_execution_agent_type": "kimi",
@@ -512,7 +512,7 @@ plan_task_id = task_create(
     display_name="📝 Plan Agent",
     spec=build_plan_spec(clarified_requirement),   # format: summary, approach,
 )                                                  # subtask DAG w/ deps+owns, risks, acceptance
-plan_handle = terminal_create(title="[plan:Plan] plan r0", command=agent_command_for(PLAN_AGENT))
+plan_handle = terminal_create(title=f"[plan:{PLAN_AGENT}] plan r0", command=agent_command_for(PLAN_AGENT))
 dispatch(task=plan_task_id, to=plan_handle, inject=True)
 
 while review_round < MAX_REVIEW_ROUNDS:              # default 3

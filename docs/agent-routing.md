@@ -11,7 +11,7 @@
 
 | 层级 | 控制什么 | 在哪里设置 | 支持？ |
 |------|---------|-----------|--------|
-| **Agent** | 用哪个 Agent（kimi / claude code / grok / pi / Plan） | 创建 worker 终端时决定（`--title` 前缀约定 + 协调者状态记录，详见下文「Worker 终端身份标识」） | ✅ |
+| **Agent** | 用哪个 Agent（kimi / claude code / grok / pi） | 创建 worker 终端时决定（`--title` 前缀约定 + 协调者状态记录，详见下文「Worker 终端身份标识」） | ✅ |
 | **Model** | Agent 用哪个模型（sonnet / opus / gpt-5.5） | `orca terminal create --command` 时传入 | ✅（但不在 dispatch 层） |
 
 > 🔑 **关键结论**：Orca orchestration 的 `dispatch` 命令**不支持传 model 参数**（也不带 `--spec`，新指令必须新建 task）。Model 必须在**创建 worker 终端时**通过 `--command` 指定。
@@ -27,8 +27,8 @@
 │   Plan   │ Complex Exec │ General Exec │   Image    │  Review   │
 │ (计划生成)│  (复杂执行)   │  (通用执行)   │ (图片生成)  │  (审查)   │
 ├──────────┼──────────────┼──────────────┼────────────┼───────────┤
-│   Plan   │     kimi     │  claude code │    grok    │    pi     │
-│          │  (kimi --auto)│   (优先)     │            │           │
+│  claude  │     kimi     │  claude code │    grok    │    pi     │
+│ (pi 备选)│  (kimi --auto)│   (优先)     │            │           │
 └──────────┴──────────────┴──────────────┴────────────┴───────────┘
 ```
 
@@ -104,11 +104,18 @@ claude code 失败 → grok 重试 → pi 补上（分析+修复/标记失败）
 
 ---
 
-### 6. 计划生成 → Plan
+### 6. 计划生成 → claude code（首选）/ pi（备选）
 
 **触发条件**：Phase 2 计划生成任务
 
-**配置项**：`routing.plan_agent_type = "Plan"`
+| 优先级 | Agent | 说明 |
+|--------|-------|------|
+| 🥇 第一优先 | **claude code** | 默认计划生成 Agent |
+| 🥈 第二优先 | **pi** | claude code 不可用时切换 |
+
+**配置项**：`routing.plan_agent_type = "claude"`
+
+> ⚠️ 若计划生成切到 pi（备选），当轮计划审查不得再用 pi（默认 review agent）——改用 claude code 或 grok，保持「审查 ≠ 实现」的跨 Agent 规则。
 
 ---
 
@@ -124,7 +131,6 @@ claude code 失败 → grok 重试 → pi 补上（分析+修复/标记失败）
 | **claude code** | 通过 Claude Code 自身配置 | `orca terminal create --worktree id:<worktreeId> --command "claude" --json`（模型由 Claude Code 配置文件控制） |
 | **grok** | 通过 Grok CLI 参数 | `orca terminal create --worktree id:<worktreeId> --command "grok" --json` |
 | **pi** | 自有模型，无外部选择 | `orca terminal create --worktree id:<worktreeId> --command "pi" --json` |
-| **Plan** | 跟随 default_model | 由 Orca 全局配置决定 |
 
 ### 创建带 Model 的 Worker 终端
 
@@ -181,7 +187,7 @@ orca terminal create \
 | **General Exec** | claude code | grok | pi | 由 Agent 配置决定 |
 | **Image** | grok | — | — | 默认 |
 | **Review**（含 integration review） | pi | — | — | 自有模型 |
-| **Plan** | Plan | — | — | default_model |
+| **Plan** | claude code | pi | — | 由 Agent 配置决定 |
 
 ---
 
@@ -236,6 +242,9 @@ orca terminal create \
 
 ```bash
 # === Agent 选择 ===
+
+# 计划生成 Agent（默认 claude，不可用时切 pi）
+export ORCA_WORKFLOW_PLAN_AGENT="claude"
 
 # 复杂执行任务
 export ORCA_WORKFLOW_COMPLEX_EXECUTION_AGENT="kimi"

@@ -74,7 +74,7 @@ wave 0 (dispatched first):  sub-1   owns: server/**, migrations/**
 wave 1 (after sub-1 PASS):  sub-2   owns: web/src/settings/**
 ```
 
-Agent routing for this run (defaults): plan = `Plan`, review = `pi`,
+Agent routing for this run (defaults): plan = `claude` (fallback `pi`), review = `pi`,
 execution = `claude`, fallback chain = `grok,pi`. Cross-review rule: the
 review agent is never the implementation agent. Limits (defaults):
 `ORCA_WORKFLOW_MAX_REVIEW_ROUNDS=3`, `ORCA_WORKFLOW_MAX_ESCALATE=2`,
@@ -123,8 +123,8 @@ checkout**.
 ```bash
 PLAN_TERM=$(orca terminal create \
   --worktree active \
-  --title "[plan:Plan] wf_20260727_001 plan" \
-  --command "Plan" \
+  --title "[plan:claude] wf_20260727_001 plan" \
+  --command "claude" \
   --json | jq -r '.result.terminal.handle')
 
 PLAN_TASK=$(orca orchestration task-create \
@@ -513,7 +513,7 @@ attempt. `sub-2`: verdict=PASS, review_rounds=1, keep_terminal=`term_s2e0`.
 
 | Handle | Stage | Role | Round | Agent | Verdict | Fate |
 |--------|-------|------|-------|-------|---------|------|
-| `term_plan` | Planning | plan | — | Plan | plan delivered | closed after review |
+| `term_plan` | Planning | plan | — | claude | plan delivered | closed after review |
 | `term_prev` | Planning | review | 1 | pi | PASS | closed |
 | `term_s1e0` | sub-1 | execution | 0 | claude | done | closed (superseded by r1) |
 | `term_s1r0` | sub-1 | review | 0 | pi | FAIL | closed |

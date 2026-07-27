@@ -5,6 +5,18 @@ All notable changes to the **multi-agent-workflow** skill are documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] — 2026-07-27
+
+### Changed
+- **Plan agent routing**: plan generation (Phase 2) now routes to
+  **claude code** (preferred) with **pi** as fallback, replacing the Orca
+  built-in `Plan` agent. `ORCA_WORKFLOW_PLAN_AGENT` and the cold-start
+  `routing.plan_agent_type` default change `Plan` → `claude`. When the
+  fallback (pi) is in effect, the plan review for that round must switch
+  off pi (use claude code or grok) to preserve the cross-agent
+  "reviewer ≠ implementer" rule. Single source of truth:
+  `docs/agent-routing.md` §6.
+
 ## [2.2.0] — 2026-07-27
 
 ### Changed (BREAKING)
