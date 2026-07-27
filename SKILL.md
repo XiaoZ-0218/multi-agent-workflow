@@ -57,40 +57,69 @@ applyTo: "**/*"
 │  │ Gather  │  │ Plan+Rev │  │ Confirm  │  │ Decompose+Dispatch│  │
 │  └─────────┘  └──────────┘  └──────────┘  └───────┬──────────┘  │
 │                                                    │             │
+│              one worktree + branch + first terminal per sub-task │
+│                                                    │             │
 │                              ┌─────────────────────┼──────┐      │
-│                              │     WORKERS (parallel)      │      │
-│                              │  ┌──────┐ ┌──────┐ ┌──────┐│      │
-│                              │  │Sub-1 │ │Sub-2 │ │Sub-3 ││      │
-│                              │  │Exec  │ │Exec  │ │Exec  ││      │
-│                              │  │+Review│+Review│+Review││      │
-│                              │  └──┬───┘ └──┬───┘ └──┬───┘│      │
-│                              └─────┼────────┼────────┼─────┘      │
+│                              │  PER-SUBTASK WORKTREES   │      │
+│                              │   (stacked branches)     │      │
+│                              │                        │      │
+│                              │  ┌──────┐  ┌──────┐  ┌──────┐│    │
+│                              │  │Sub-1 │  │Sub-2 │  │Sub-3 ││    │
+│                              │  │wt+br │  │wt+br │  │wt+br ││    │
+│                              │  │ ↓    │  │ ↓    │  │ ↓    ││    │
+│                              │  │ term0│→ │ term0│  │ term0││    │
+│                              │  │ exec │  │ exec │  │ exec ││    │
+│                              │  │ ↓    │  │ ↓    │  │ ↓    ││    │
+│                              │  │term1 │  │term1 │  │term1 ││    │
+│                              │  │review│  │review│  │review││    │
+│                              │  │ ...  │  │ ...  │  │ ...  ││    │
+│                              │  └──┬───┘  └──┬───┘  └──┬───┘│    │
+│                              │     │ stacked│        │     │    │
+│                              │     │  ◄─────┘        │     │    │
+│                              └─────┼────────────────┼─────┘    │
 │  ┌──────────┐  ┌──────────┐       │        │        │            │
 │  │ Phase 6  │←─┤ Collect  │←──────┴────────┴────────┘            │
-│  │ Decide   │  │ All Done │                                       │
-│  └────┬─────┘  └──────────┘                                       │
+│  │ Decide   │  │ All Done │   (one PR + worktree cleanup per     │
+│  └────┬─────┘  └──────────┘    sub-task, in dependency order)    │
 │       │                                                            │
 │  ┌────┴─────┐  ┌──────────┐  ┌──────────┐                        │
 │  │ Phase 7  │→│ Phase 8  │→│  Notify  │                        │
-│  │ PR/Merge │  │ Cleanup  │  │  User    │                        │
-│  └──────────┘  └──────────┘  └──────────┘                        │
+│  │PR/Merge  │  │ Cleanup  │  │  User    │                        │
+│  │per-sub   │  │per-wt    │  │          │                        │
+│  └─────────┘  └──────────┘  └──────────┘                        │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+### v2.1.0 — What's Different from v2.0.x
+
+| Aspect | v2.0.x (legacy) | v2.1.0 |
+|--------|------------------|--------|
+| Worktree | One shared `feature/<slug>-<ts>` for the whole workflow | **One per sub-task**: `feature/<wf>/<sub>-<ts>` |
+| Branch base | Always `main` | **Stacked**: deps-less → `main`; dependent → parent sub-task's branch |
+| PR | One bundle PR for all sub-tasks | **One per sub-task**; dependent PRs start as draft |
+| Review loop | Same worker terminal self-reviews up to MAX_SUB_RETRY | **Fresh terminal per round**: implement → review (new) → fix (new) → review (new) → … |
+| Cross-review | Self-review only | **Cross-agent**: implement with `claude`/`kimi`, review with `pi` (see `docs/agent-routing.md`) |
+| Parallelism safety | Sub-agents can clobber each other in shared worktree | Each sub-task has its own worktree; no cross-task contention |
 
 ### Design Principles
 
 | Principle | Implementation |
 |-----------|---------------|
+| **Per-Subtask Isolation** | Each sub-task owns a dedicated worktree + branch + set of terminals; sub-tasks never share filesystem state |
+| **Stacked Branches for Dependencies** | Dependent sub-tasks branch off parent tips (not main); preserves parallelism; auto-rebases onto `main` when the parent PR merges |
+| **Per-Round Fresh Agent** | Implementation, cross-review, and fix are each a separate `orca terminal create` invocation in the same worktree — no Agent context reuse, no carry-over bias |
 | **Fail-Safe by Default** | Every loop has a hard cap; no infinite retries |
-| **Human-in-the-Loop at High-Value Gates** | Escalation only at plan-review and merge-conflict boundaries |
-| **Collect-All-Then-Decide** | Subtask failures do NOT interrupt sibling workers; all results aggregate before the retry decision |
-| **PR-Only Merge Path** | No direct `git merge`; all integrations go through pull requests |
-| **Immutable Audit Trail** | Every decision gate, escalation, and termination is logged to `.orca/workflow-state.json` |
-| **Degraded Delivery over Total Failure** | When retries are exhausted, completed artifacts are delivered; failed items are flagged for manual follow-up |
+| **Human-in-the-Loop at High-Value Gates** | Escalation only at plan-review, per-subtask merge-conflict, and parked-subtask boundaries |
+| **Collect-All-Then-Decide** | Sub-task failures do NOT interrupt sibling sub-tasks; all results aggregate before the global retry decision |
+| **Per-Subtask PR + No Direct Merge** | No direct `git merge`; each sub-task integrates through its own PR; dependent PRs auto-rebase onto `main` when the parent merges |
+| **Immutable Audit Trail** | Every decision gate, escalation, terminal spawn, and PR transition is logged to `.orca/workflow-state.json` (with `subtask_id` scope since v2.1.0) |
+| **Degraded Delivery over Total Failure** | When retries are exhausted, completed sub-tasks merge independently; failed sub-tasks are parked with per-subtask recovery manifests |
 
 ---
 
 ## 2. State Machine
+
+v2.1.0 introduces a **per-sub-task subgraph** under `DISPATCHING`/`EXECUTING`/`MERGING`/`CLEANING`. The workflow-level state advances only when **all** sub-tasks reach the corresponding state; an individual sub-task can be `PARKED` without terminating the workflow.
 
 ```
                     ┌─────────┐
@@ -114,34 +143,55 @@ applyTo: "**/*"
         │(Phase 3) │──► FORCE_TERMINATE
         └────┬─────┘
              │
-        ┌────┴─────┐
-        │DISPATCHING│◄─── Retry Failed Items ───┐
-        │(Phase 4)  │                           │
-        └────┬─────┘                            │
-             │                                  │
-        ┌────┴─────┐                            │
-        │ EXECUTING │──► SUB_FAILURES           │
-        │(Phase 5)  │                           │
-        └────┬─────┘                            │
-             │                                  │
-        ┌────┴─────┐                            │
-        │DECIDING  │──► RETRY ──────────────────┘
-        │(Phase 6)  │──► DEGRADE (partial)
-        └────┬─────┘──► ESCALATE_SUB
-             │
-        ┌────┴─────┐
-        │ MERGING  │──► CONFLICT ──► AUTOFIX ──► HUMAN
-        │(Phase 7)  │──► PARKED
-        └────┬─────┘
-             │
-        ┌────┴─────┐
-        │CLEANING  │
-        │(Phase 8)  │
-        └────┬─────┘
-             │
-        ┌────┴─────┐
-        │  DONE    │
-        └──────────┘
+        ┌────┴────────┐
+        │DISPATCHING  │◄─── Retry Failed Items ───┐
+        │(Phase 4)    │   (per-subtask worktrees) │
+        └────┬────────┘                            │
+             │ for each sub-task (topo order):      │
+             │   create wt+br, spawn first terminal │
+             ▼                                     │
+        ┌──────────────────────────────────┐       │
+        │ EXECUTING  (per-subtask, parallel)│       │
+        │ ┌──────────────────────────────┐ │       │
+        │ │ round 0: implement (new term)│ │       │
+        │ │ round 1: review   (new term) │ │       │
+        │ │ round 2: fix      (new term) │ │       │
+        │ │ round 3: review   (new term) │ │       │
+        │ │ ... up to MAX_SUB_RETRY      │ │       │
+        │ │ pass → exit to MERGING_sub-N │ │       │
+        │ │ fail → SUB_FAILURES ─────────┼─┼──► Phase 6
+        │ └──────────────────────────────┘ │       │
+        │ ... one block per sub-task ...   │       │
+        └──────────────┬───────────────────┘       │
+                       │ all sub-tasks done        │
+        ┌──────────────▼───────────┐              │
+        │ DECIDING  (Phase 6)      │              │
+        │ RETRY ───────────────────┼──────────────┘
+        │ DEGRADE / ESCALATE_SUB   │
+        └──────────────┬───────────┘
+                       │
+        ┌──────────────▼───────────────────────┐
+        │ MERGING  (Phase 7, per-subtask)      │
+        │ for each sub-task (topo order):      │
+        │   rebase onto base_branch            │
+        │   push + gh pr create --base parent  │
+        │   wait human gate                    │
+        │   on parent merge → rebase + flip    │
+        │ PARKED (per-subtask, recoverable)    │
+        └──────────────┬───────────────────────┘
+                       │ all merged / parked
+        ┌──────────────▼───────────────────────┐
+        │ CLEANING  (Phase 8, per-subtask,     │
+        │ reverse-topo order)                  │
+        │ delete branch, remove worktree,      │
+        │ close keep_terminal, write park md   │
+        └──────────────┬───────────────────────┘
+                       │
+                ┌──────┴──────┐
+                ▼             ▼
+          ┌────────┐    ┌────────────┐
+          │  DONE  │    │TERMINATED  │
+          └────────┘    └────────────┘
 ```
 
 ### State Transition Table
@@ -157,15 +207,21 @@ applyTo: "**/*"
 | `CONFIRMING` | User approves | `DISPATCHING` | — |
 | `CONFIRMING` | User rejects (retries < 3) | `PLANNING` | Feedback collected |
 | `CONFIRMING` | User rejects (retries ≥ 3) | `TERMINATED` | Terminate2 or force-continue |
-| `DISPATCHING` | All tasks dispatched | `EXECUTING` | — |
-| `EXECUTING` | All workers done | `DECIDING` | — |
-| `DECIDING` | All passed | `MERGING` | AllOK = yes |
-| `DECIDING` | Retry (global retries < 2) | `DISPATCHING` | Only failed items |
-| `DECIDING` | Degrade | `MERGING` | PartialOK flag set |
+| `DISPATCHING` | All sub-tasks have worktree+branch+first terminal | `EXECUTING` | — |
+| `DISPATCHING` | Sub-task creation failed (infra) | `TERMINATED` | Coordinator-side failure only; per-subtask failures don't terminate dispatch |
+| `EXECUTING.sub-N` | Cross-review PASS | `EXECUTING` (waiting on siblings) | All sub-tasks must reach this for workflow to advance |
+| `EXECUTING.sub-N` | Round budget exhausted | `EXECUTING.sub-N` (FAIL) | Per-sub-task failure; siblings continue |
+| `EXECUTING` | All sub-tasks have terminal verdict | `DECIDING` | — |
+| `DECIDING` | All sub-tasks passed | `MERGING` | AllOK = yes |
+| `DECIDING` | Retry (global retries < 2) | `DISPATCHING` | Only failed sub-tasks get new worktree+branch |
+| `DECIDING` | Degrade | `MERGING` | PartialOK flag set; passed sub-tasks continue to PR |
 | `DECIDING` | Escalate → human aborts | `TERMINATED` | Terminate3 |
-| `MERGING` | PR merged | `CLEANING` | — |
-| `MERGING` | PR closed / parked | `CLEANING` | Park flag set |
-| `CLEANING` | Cleanup complete | `DONE` | — |
+| `MERGING.sub-N` | Parent merged → rebase + flip base | `MERGING.sub-N` (rebase) | Only if this sub-task has deps |
+| `MERGING.sub-N` | PR merged | `MERGING` (waiting on siblings) | — |
+| `MERGING.sub-N` | Auto-fix exhausted + human parks | `MERGING.sub-N` (PARKED) | Per-sub-task parking; siblings continue |
+| `MERGING` | All sub-tasks merged or parked | `CLEANING` | — |
+| `CLEANING.sub-N` | Worktree + branch removed + keep_terminal closed | `CLEANING` (next sibling) | Reverse-topo order |
+| `CLEANING` | All sub-tasks cleaned | `DONE` | — |
 
 ---
 
