@@ -1,163 +1,178 @@
 # Workflow State Diagram
 
-> Full Mermaid flowchart for the Multi-Agent Orchestration Workflow **v2.1.0**.
+> Full Mermaid flowchart for the Multi-Agent Orchestration Workflow **v2.2.0**.
 > Rendering: paste this into any Mermaid-compatible viewer (GitHub, Mermaid Live, Obsidian).
+> Diagram node labels are in Chinese; the surrounding documentation is English.
 >
-> v2.1.0 key change: each sub-task owns its own worktree + branch + set of fresh
-> terminals. Dependent sub-tasks are **stacked** on their parent's branch until
-> the parent PR merges — at which point the §11.8 rebase hook flips the
-> dependent PR's base to `main`.
+> v2.2.0 key change: **one worktree per feature**. The coordinator stays on the
+> main branch for the entire run (never `git checkout`); every sub-task executes
+> inside a single shared feature worktree on one `feature/<slug>` branch based on
+> `origin/main`, and the feature ships as ONE PR. Parallelism safety comes from
+> per-sub-task `owns` file-ownership globs — same-wave sub-tasks must have
+> disjoint `owns`, validated during plan review — and dispatch happens in DAG
+> **waves**: a dependent sub-task starts only after ALL its parents reach
+> verdict=PASS, seeing their committed code naturally in the shared worktree.
+> Before the PR is created, a dedicated **integration review** (fresh read-only
+> review terminal) reviews the whole feature: plan, per-sub-task verdicts, test
+> results, and `git diff origin/main...HEAD`.
 
 ```mermaid
 graph TD
-    Start([User Request]) --> Meet[Phase 1: Requirements Gathering<br/>Coordinator analyzes request]
-    Meet --> Q1{Is the request<br/>sufficiently clear?}
-    Q1 -->|No| Ask[Ask clarifying questions<br/>orca orchestration ask]
+    Start([用户发起请求]) --> Meet[主 Agent @main: 需求对接<br/>全程不离开 main 分支]
+    Meet --> Q1{信息是否清晰?}
+    Q1 -->|否| Ask[向用户追问]
     Ask --> Meet
-    Q1 -->|Yes| DocGen[Phase 2: Plan Generation<br/>task-create + dispatch]
+    Q1 -->|是| DocGen[方案 Agent: 生成技术方案<br/>产物以文本传递, 不落盘 main]
 
-    subgraph PlanLoop ["Phase 2: Plan Review Loop (max 3 review rounds + 2 escalations)"]
-        DocGen --> Review[Review Agent<br/>gate-create]
-        Review --> Q2{Review passed?<br/>Round ≤ MAX_REVIEW_ROUNDS}
-        Q2 -->|No, retries remain| Fix[Revise plan<br/>with review feedback]
+    subgraph PlanLoop [方案审核循环: 最多 3+2 轮]
+        DocGen --> Review[Review Agent 审方案<br/>含 owns 不相交校验]
+        Review --> Q2{通过? 轮次 ≤ 3}
+        Q2 -->|否, 未超限| Fix[修改方案, 附 Review 意见]
         Fix --> Review
-        Q2 -->|Retries exhausted| Escalate[Escalate to Human<br/>orca orchestration ask]
-        Escalate --> EscCnt{Escalation count?}
-        EscCnt -->|≤ MAX_ESCALATE| DocGen
-        EscCnt -->|> MAX_ESCALATE| Terminate1["❌ TERMINATED<br/>Plan cannot converge"]
+        Q2 -->|超限| Escalate[升级人工, 说明分歧点]
+        Escalate --> EscCnt{人工介入 ≤ 2 次?}
+        EscCnt -->|是| DocGen
+        EscCnt -->|否| Terminate1[❌ 终止: 方案无法收敛]
     end
 
-    Q2 -->|Yes| Confirm[Phase 3: User Confirmation<br/>Present plan summary]
-    Confirm --> Q3{User approves?<br/>Round ≤ MAX_USER_CONFIRM}
-    Q3 -->|No, retries remain| Feedback[Collect user feedback]
+    Q2 -->|是| Confirm[向用户确认方案]
+    Confirm --> Q3{用户确认? 最多 3 次}
+    Q3 -->|不通过, 未超限| Feedback[收集反馈]
     Feedback --> DocGen
-    Q3 -->|Retries exhausted| ForceChoice{Force decision}
-    ForceChoice -->|Continue revising| DocGen
-    ForceChoice -->|Terminate| Terminate2["❌ TERMINATED<br/>Directional misalignment"]
-    Q3 -->|Yes| Plan[Phase 4: Task Decomposition<br/>Generate sub-task DAG]
+    Q3 -->|不通过, 超限| ForceChoice{强制决策}
+    ForceChoice -->|继续修改| DocGen
+    ForceChoice -->|终止| Terminate2[❌ 终止: 方向偏差过大]
+    Q3 -->|通过| Plan[主 Agent: 拆解子任务<br/>每个声明 deps + owns 文件所有权]
+    Q3 -->|Abort 任意轮次| Terminate2
 
-    Plan --> DispatchLoop{For each sub-task<br/>in topo order}
-    DispatchLoop -->|sub-N| CreateWT[Phase 4: Create worktree + branch<br/>base = main or parent branch<br/>orca worktree create]
-    CreateWT --> SpawnFirst[Phase 4: Spawn FRESH execution terminal<br/>tagged with sub-task's complexity Agent<br/>orca terminal create]
-    SpawnFirst --> Dispatch[Phase 4: Dispatch implementation spec<br/>orca orchestration dispatch]
-    SpawnFirst -.record.-> State1[(state.tasks.subtasks sub-N<br/>worktree_path, branch_name,<br/>keep_terminal, base_branch)]
+    Plan --> BranchExist{同名 worktree 已存在?<br/>崩溃恢复场景}
+    BranchExist -->|是, 复用恢复| Dispatch
+    BranchExist -->|否| CreateWT[创建 feature worktree<br/>base = origin/main]
+    CreateWT --> Dispatch[按 DAG 波次分发:<br/>无依赖先并行, 有依赖等父任务通过]
 
-    subgraph SubA ["Sub-task A (deps-less): branch base = main"]
-        Dispatch --> SubA_Impl[Sub-A Round 0: Implementation<br/>execution terminal]
-        SubA_Impl --> SubA_Review[Sub-A Round 0: Cross-Review<br/>FRESH review terminal<br/>tagged review Agent]
-        SubA_Review --> SubA_Q{Pass?}
-        SubA_Q -->|Yes| SubA_Done["✅ Sub-A complete"]
-        SubA_Q -->|No| SubA_Fix[Sub-A Round 1: Fix<br/>FRESH execution terminal<br/>tagged execution Agent]
-        SubA_Fix --> SubA_Review2[Sub-A Round 1: Re-Review<br/>FRESH review terminal]
-        SubA_Review2 --> SubA_Q2{Pass?}
-        SubA_Q2 -->|Yes| SubA_Done
-        SubA_Q2 -->|No, budget left| SubA_Fix
-        SubA_Q2 -->|No, budget gone| SubA_Fail["❌ Sub-A FAIL"]
+    subgraph ParallelExec [执行阶段: 同一 worktree, owns 不相交]
+        Dispatch --> Sub1[子任务 1 执行<br/>完成后 commit 到 feature 分支]
+        Sub1 --> SubReview1[新开 Review Agent<br/>只审该子任务的 commit 范围]
+        SubReview1 --> SubCheck1{通过? ≤ 3 轮}
+        SubCheck1 -->|否| SubFix1[新开 Fix Agent<br/>附 review 意见]
+        SubFix1 --> SubReview1
+        SubCheck1 -->|超限| SubFail1[标记失败 + 原因]
+        SubCheck1 -->|是| SubDone1[✅ 子任务 1]
+
+        Dispatch --> Sub2[子任务 2 执行<br/>完成后 commit]
+        Sub2 --> SubReview2[新开 Review Agent]
+        SubReview2 --> SubCheck2{通过? ≤ 3 轮}
+        SubCheck2 -->|否| SubFix2[新开 Fix Agent]
+        SubFix2 --> SubReview2
+        SubCheck2 -->|超限| SubFail2[标记失败 + 原因]
+        SubCheck2 -->|是| SubDone2[✅ 子任务 2]
     end
 
-    subgraph SubB ["Sub-task B (deps on A): branch base = Sub-A's branch (stacked)"]
-        SpawnFirstB[Phase 4: Sub-B wt+branch based on A<br/>FRESH execution terminal]
-        DispatchB[Phase 4: Dispatch sub-B spec]
-        SpawnFirstB --> DispatchB
-        SpawnFirstB -.record.-> State2[(state.tasks.subtasks sub-B<br/>worktree_path, branch_name,<br/>base_branch = A's branch)]
+    SubDone1 --> Collect[主 Agent: 收集全部结果<br/>check --wait 滚动等待]
+    SubFail1 --> Collect
+    SubDone2 --> Collect
+    SubFail2 --> Collect
 
-        DispatchB --> SubB_Impl[Sub-B Round 0: Implementation<br/>in sub-B worktree]
-        SubB_Impl --> SubB_Review[Sub-B Round 0: Cross-Review<br/>FRESH review terminal]
-        SubB_Review --> SubB_Q{Pass?}
-        SubB_Q -->|Yes| SubB_Done["✅ Sub-B complete (waiting for A to merge)"]
-        SubB_Q -->|No| SubB_Fix[Sub-B Round 1: Fix<br/>FRESH execution terminal]
-        SubB_Fix --> SubB_Review2[Sub-B Round 1: Re-Review<br/>FRESH review terminal]
-        SubB_Review2 --> SubB_Q2{Pass?}
-        SubB_Q2 -->|Yes| SubB_Done
-        SubB_Q2 -->|No, budget left| SubB_Fix
-        SubB_Q2 -->|No, budget gone| SubB_Fail["❌ Sub-B FAIL"]
+    Collect --> AllOK{全部通过?}
+    AllOK -->|是| Prep
+    AllOK -->|否| RetryDecision{重试策略?<br/>全局 ≤ 2 轮}
+    RetryDecision -->|重试失败项, 新建 task| Dispatch
+    RetryDecision -->|降级交付| PartialOK[revert 失败子任务的 commits<br/>PR 标注缺失项]
+    RetryDecision -->|超限| EscalateSub[升级人工]
+    EscalateSub --> HumanSubDecision{人工决策}
+    HumanSubDecision -->|指定方向| Dispatch
+    HumanSubDecision -->|接受部分交付| PartialOK
+    HumanSubDecision -->|放弃| Terminate3[❌ 终止: 子任务无法完成]
+    PartialOK --> Prep
+
+    Prep[主 Agent: 变更摘要 + 在 feature worktree 跑项目测试]
+    Prep --> Rebase[feature 分支 rebase 到 origin/main]
+    Rebase --> Block{冲突?}
+    Block -->|有| AutoFix[新开 Agent 自动解冲突<br/>≤ 2 次]
+    AutoFix --> FixOK{解决?}
+    FixOK -->|是| OverallReview
+    FixOK -->|否| DeliverBlock[交付人工, 附冲突详情]
+    DeliverBlock --> HumanSolve{人工处理}
+    HumanSolve -->|已解决| OverallReview
+    HumanSolve -->|放弃| Park
+    Block -->|无| OverallReview
+
+    subgraph FinalGate [合并前总体 Review: 新开 Agent, 与实现不同家]
+        OverallReview[总体 Review Agent<br/>审 git diff origin/main...HEAD<br/>+ 测试结果 + 方案对照] --> OVQ{通过? ≤ 2 轮}
+        OVQ -->|否| OVFix[新开 Fix Agent<br/>按 findings 修复并 commit]
+        OVFix --> OverallReview
+        OVQ -->|超限| OVEsc[升级人工: 放行或 park]
     end
 
-    SubA_Done --> Collect[Phase 6: Collect All Sub-task Verdicts]
-    SubB_Done --> Collect
-    SubA_Fail --> Collect
-    SubB_Fail --> Collect
+    OVQ -->|是| CreatePR[gh pr create --base main<br/>附变更摘要 + 总体 review 结论]
+    OVEsc -->|人工放行| CreatePR
+    OVEsc -->|park| Park
 
-    Collect --> Analyze[Phase 6: Analyze Results]
-    Analyze --> AllOK{All sub-tasks<br/>passed?}
-    AllOK -->|Yes| TopoMerge[Phase 7: Per-sub-task PR<br/>in topological order]
-    AllOK -->|No| RetryDecision{Retry strategy?<br/>Global retries ≤ MAX_GLOBAL_RETRY}
-    RetryDecision -->|Retry failed, retries remain| DispatchLoop
-    RetryDecision -->|Degrade delivery| PartialOK[Mark: partial delivery<br/>Passed sub-tasks ship<br/>Failed sub-tasks flagged]
-    RetryDecision -->|Retries exhausted, escalate| EscalateSub[Escalate to Human<br/>orca orchestration ask]
-    EscalateSub --> HumanSubDecision{Human decision}
-    HumanSubDecision -->|Provide direction| DispatchLoop
-    HumanSubDecision -->|Accept partial delivery| PartialOK
-    HumanSubDecision -->|Abort| Terminate3["❌ TERMINATED<br/>Sub-task(s) cannot<br/>be completed"]
-    PartialOK --> TopoMerge
+    CreatePR --> PRWait{PR 状态?<br/>人工 review}
+    PRWait -->|有意见| FixPR[新开 Fix Agent<br/>push 到同一分支]
+    FixPR --> PRWait
+    PRWait -->|已合并| Cleanup[删除远端分支<br/>orca worktree rm + 关闭终端<br/>主 Agent 仅 git fetch]
+    PRWait -->|被关闭| Park[保留分支/worktree<br/>写 .orca/parked/ 恢复指引]
 
-    TopoMerge --> SubAPR[Phase 7: Sub-A<br/>rebase onto main<br/>push, gh pr create<br/>base = main]
-    SubAPR --> SubAPoll{Sub-A PR status?}
-    SubAPoll -->|Changes requested| SubAFix[Sub-A PR-fix<br/>FRESH execution terminal<br/>commit + push]
-    SubAFix --> SubAPoll
-    SubAPoll -->|Merged| SubAOnMerge[/§11.8 Stacked-PR Hook:<br/>for each dependent of A: rebase<br/>onto main, gh pr edit --base main,<br/>gh pr ready/]
-
-    SubAOnMerge --> SubBPR[Phase 7: Sub-B (was draft)<br/>now: rebase onto main<br/>gh pr edit --base main<br/>gh pr ready]
-    SubBPR --> SubBPoll{Sub-B PR status?}
-    SubBPoll -->|Changes requested| SubBFix[Sub-B PR-fix<br/>FRESH execution terminal]
-    SubBFix --> SubBPoll
-    SubBPoll -->|Merged| SubBDone["✅ Sub-B complete"]
-    SubBPoll -->|Closed| SubBPark["🅿️ Sub-B PARKED<br/>per-sub-task manifest written"]
-    SubAPoll -->|Closed| SubAPark["🅿️ Sub-A PARKED<br/>per-sub-task manifest written"]
-
-    SubADone[Sub-A merged]
-    SubADone --> CleanupLoop
-    SubBDone --> CleanupLoop
-    SubAPark --> CleanupLoop
-    SubBPark --> CleanupLoop
-
-    CleanupLoop{For each sub-task<br/>in REVERSE-topo order}
-    CleanupLoop -->|merged| CleanMerge[Phase 8: delete remote branch<br/>+ orca worktree remove<br/>+ orca terminal close keep_terminal]
-    CleanupLoop -->|parked| CleanPark[Phase 8: write .orca/parked/&lt;sub&gt;.md<br/>+ orca terminal close keep_terminal]
-    CleanupLoop -->|skipped/fail| CleanDrop[Phase 8: delete branch + worktree<br/>+ orca terminal close]
-
-    CleanMerge --> Final[Phase 8: Archive<br/>Append per-sub-task history line<br/>to .orca/workflow-history.jsonl]
-    CleanPark --> Final
-    CleanDrop --> Final
-    Final --> Notify[Notify User<br/>orca orchestration ask]
-    Notify --> End([Done])
+    Cleanup --> Final[归档: 结果/产物/分支状态<br/>jq 原子更新 state 文件]
+    Park --> Final
+    Final --> Notify[通知用户, 附交付报告]
+    Notify --> End([结束])
 ```
 
 ## State Transition Table
 
+PARKED is a **feature-level** state in v2.2.0 (there is exactly one worktree,
+branch, and PR per run). `MERGING` sub-steps run in the fixed order
+`rebase → autofix → tests → integration-review → pr-create → pr-monitor`.
+
 | From | Trigger | To | Guard |
 |------|---------|----|-------|
-| `INIT` | User request received | `GATHERING` | — |
+| `INIT` | User request received; prerequisites verified | `GATHERING` | `orca status --json` ok; coordinator inside an Orca-managed checkout on `main` |
 | `GATHERING` | Requirements clear | `PLANNING` | Q1 = yes |
-| `GATHERING` | Max clarifications | `TERMINATED` | > 5 rounds |
-| `PLANNING` | Review passed | `CONFIRMING` | Q2 = yes |
-| `PLANNING` | Rounds exhausted + escalate ≤ 2 | `PLANNING` | Escalate → retry |
-| `PLANNING` | Escalate > 2 | `TERMINATED` | Terminate1 |
+| `GATHERING` | Clarification rounds exhausted | `TERMINATED` | > 5 rounds; user interaction only via the coordinator's native channel |
+| `PLANNING` | Review-agent verdict = PASS (via `worker_done`) | `CONFIRMING` | Review is a separate dispatched task (never gate-create); checklist requires every sub-task to declare `owns` and same-wave `owns` to be disjoint |
+| `PLANNING` | Review FAIL, rounds remain | `PLANNING` | Round ≤ MAX_REVIEW_ROUNDS (3); plan revised with review feedback, passed as text |
+| `PLANNING` | Rounds exhausted, escalate to human | `PLANNING` | Escalations ≤ MAX_ESCALATE (2) |
+| `PLANNING` | Escalations exhausted | `TERMINATED` | Terminate1 |
 | `CONFIRMING` | User approves | `DISPATCHING` | — |
-| `CONFIRMING` | User rejects (< 3) | `PLANNING` | With feedback |
-| `CONFIRMING` | User rejects (≥ 3) | `TERMINATED` | Terminate2 |
-| `DISPATCHING` | All sub-tasks have wt+branch+first terminal | `EXECUTING` | — |
-| `DISPATCHING.sub-N` | Worktree/branch/terminal creation failed | `TERMINATED` | Infra-only failure; per-sub-task failures don't terminate |
-| `EXECUTING.sub-N` | Cross-review PASS | `EXECUTING` (waiting on siblings) | All sub-tasks must reach terminal verdict to advance |
-| `EXECUTING.sub-N` | Round budget exhausted | `EXECUTING.sub-N` (FAIL) | Siblings continue |
-| `EXECUTING` | All sub-tasks terminal | `DECIDING` | — |
-| `DECIDING` | All passed | `MERGING` | AllOK = yes |
-| `DECIDING` | Retry (< 2) | `DISPATCHING` | Failed sub-tasks only — get new wt+branch |
-| `DECIDING` | Degrade | `MERGING` | PartialOK set; passed sub-tasks continue to PR |
+| `CONFIRMING` | User rejects, rounds remain | `PLANNING` | Round ≤ MAX_USER_CONFIRM (3); feedback carries back (Revise — no scope-reduction option) |
+| `CONFIRMING` | User rejects, rounds exhausted | `TERMINATED` | Terminate2 |
+| `CONFIRMING` | User aborts | `TERMINATED` | Immediate at ANY round (v2.2.0 off-by-one fix) |
+| `DISPATCHING` | Same-name worktree found | `DISPATCHING` (resume) | `orca worktree list --json` matched by name — crash recovery; reuse, do not recreate |
+| `DISPATCHING` | Worktree created + wave 0 dispatched | `EXECUTING` | `git fetch origin main` + `orca worktree create --name "<slug>" --base-branch origin/main`; state records worktree {id, path, branch_name, base_branch} |
+| `DISPATCHING` | Worktree creation failed | `TERMINATED` | Infra-level failure |
+| `EXECUTING` (wave w) | Every sub-task in wave w at verdict=PASS | `EXECUTING` (wave w+1) | A dependent sub-task dispatches only after ALL parents PASS; it sees parents' committed code in the shared worktree |
+| `EXECUTING.sub-N` | Cross-review PASS | `EXECUTING` (waiting on wave) | Review covers only `<base_sha>..HEAD` within the sub-task's `owns`; reviewer ≠ implementer; fresh terminal per round |
+| `EXECUTING.sub-N` | Review FAIL, rounds remain | `EXECUTING.sub-N` (round r+1) | Rounds 0..MAX_SUB_RETRY (1 initial + ≤ 3 retries); NEW task chained with `--parent` on a FRESH terminal — never re-dispatch the same task |
+| `EXECUTING.sub-N` | Final round's review still FAIL | `EXECUTING.sub-N` (FAIL) | verdict=FAIL recorded with reason; siblings continue |
+| `EXECUTING` | All sub-tasks reach a terminal verdict | `DECIDING` | Coordinator waits via rolling `check --wait`; a wait timeout is a liveness checkpoint, not a failure |
+| `DECIDING` | All PASS | `MERGING` | AllOK = yes |
+| `DECIDING` | Retry failed sub-tasks only | `DISPATCHING` | Allowed while global_retries_used < MAX_GLOBAL_RETRY (2), checked BEFORE incrementing — at most 2 retries |
+| `DECIDING` | Degrade | `MERGING` | Coordinator reverts each failed sub-task's commit range in the feature worktree — clean because `owns` are disjoint; unclean revert → `PARKED` |
 | `DECIDING` | Human aborts | `TERMINATED` | Terminate3 |
-| `MERGING.sub-N` | Parent merged → rebase + flip base | `MERGING.sub-N` (rebase) | Only if sub-task has deps (§11.8 hook) |
-| `MERGING.sub-N` | PR merged | `MERGING` (waiting on siblings) | — |
-| `MERGING.sub-N` | Auto-fix exhausted + human parks | `MERGING.sub-N` (PARKED) | Per-sub-task parking; siblings continue |
-| `MERGING` | All merged or parked | `CLEANING` | — |
-| `CLEANING.sub-N` | Branch deleted + worktree removed + keep_terminal closed | `CLEANING` (next sibling) | Reverse-topo order |
-| `CLEANING` | All sub-tasks cleaned | `DONE` | — |
+| `MERGING.rebase` | `git rebase origin/main` clean | `MERGING.tests` | Runs inside the feature worktree |
+| `MERGING.rebase` | Conflicts | `MERGING.autofix` | ≤ MAX_AUTOFIX (2) attempts; fresh terminal resolves conflicts and runs `git rebase --continue` |
+| `MERGING.autofix` | Rebase completed AND zero `^UU` files | `MERGING.tests` | SUCCESS requires both conditions — then break the loop |
+| `MERGING.autofix` | Any autofix failure / attempts exhausted | human decision | Manual resolve → `MERGING.tests`; give up → `PARKED` |
+| `MERGING.tests` | Project tests run in the worktree, results recorded | `MERGING.integration-review` | Results feed the integration-review spec |
+| `MERGING.integration-review` | Verdict PASS | `MERGING.pr-create` | Fresh read-only review terminal; spec = plan + per-sub-task verdicts + test results + `git diff origin/main...HEAD` |
+| `MERGING.integration-review` | Verdict FAIL, rounds remain | `MERGING.integration-review` (round r+1) | FRESH fix terminal applies findings and commits; ANOTHER fresh review terminal re-reviews; ≤ MAX_INTEGRATION_REVIEW (2) rounds |
+| `MERGING.integration-review` | Rounds exhausted | human decision | Release anyway → `MERGING.pr-create`; park → `PARKED` |
+| `MERGING.pr-create` | `gh pr create` exit code 0 | `MERGING.pr-monitor` | Body = change summary, artifacts, per-sub-task review rounds, integration-review verdict, ⚠️ degraded banner if applicable |
+| `MERGING.pr-monitor` | Poll: `MERGED` | `CLEANING` | `gh pr view --json state,mergeStateStatus` every 60s; never gate-create inside the poll loop |
+| `MERGING.pr-monitor` | Changes Requested | `MERGING.pr-monitor` (pr-fix round) | Fresh fix terminal → push to the same branch → keep monitoring |
+| `MERGING.pr-monitor` | `CLOSED` | `PARKED` | Feature-level park |
+| `PARKED` | Park manifest written | `CLEANING` | `.orca/parked/<feature-slug>.md`: branch, worktree path, PR url, reason, recovery steps; worktree + branch KEPT |
+| `CLEANING` | Merged: remote branch deleted, worktree removed, keep_terminal closed | `CLEANING` (archive) | `git push origin --delete <branch>`; `orca worktree rm --worktree id:<id> --force`; every pr_state handled explicitly (OPEN at cleanup = guard/warn) |
+| `CLEANING` | History appended, state finalized | `DONE` | ONE line to `.orca/workflow-history.jsonl`; state updates via jq atomic write (tmp file + mv); coordinator only runs `git fetch origin` afterwards |
 
 ## Termination Exits
 
-| Exit | Trigger Condition | Per-Sub-Task State |
-|------|------------------|-------------------|
-| **Terminate1** | Plan cannot pass review after 2 human escalations | No sub-tasks started — plan was never approved |
-| **Terminate2** | User rejects plan > 3 times | No sub-tasks started — user disagreed with direction |
-| **Terminate3** | Sub-tasks fail after global retry + human abort | Completed sub-tasks preserved in their own worktrees; failed sub-tasks have per-sub-task park manifests |
-| **Per-sub-task PARKED** | Auto-fix exhausted on one sub-task | Siblings continue; that sub-task gets `.orca/parked/<sub>.md` |
-| **Workflow DONE** | All sub-tasks merged (or parked) | Each merged sub-task's branch deleted, worktree removed, keep_terminal closed |
+| Exit | Trigger Condition | Feature State |
+|------|------------------|---------------|
+| **Terminate1** | Plan cannot pass review within 3 review rounds + 2 human escalations | No worktree ever created — plan was never approved; nothing to clean up |
+| **Terminate2** | User rejects the plan 3 times, or aborts at any confirmation round | No worktree ever created — user disagreed with the direction |
+| **Terminate3** | Sub-tasks still fail after global retries (≤ 2) and the human chooses abort | Passed sub-tasks' commits remain on the feature branch; worktree + branch disposition follows Phase 8 cleanup |
+| **Feature-level PARKED** (recoverable) | Unclean degrade revert; rebase autofix exhausted + human parks; integration review exhausted + human parks; PR closed unmerged | Worktree + branch KEPT; `.orca/parked/<feature-slug>.md` records branch, worktree path, PR url, reason, recovery steps |
+| **DONE** | PR merged (full or degraded delivery) | Remote branch deleted, worktree removed, keep_terminal closed, one history line appended to `.orca/workflow-history.jsonl` |
