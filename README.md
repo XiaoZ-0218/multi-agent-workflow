@@ -2,7 +2,7 @@
 
 > **Production-grade multi-agent pipeline for Orca IDE** — take a user request from requirements through to merged PR, with parallel execution, review gates, human-in-the-loop fallbacks, and full audit trail.
 
-[![Skill Version](https://img.shields.io/badge/skill-v2.0.0-blue)](./SKILL.md)
+[![Skill Version](https://img.shields.io/badge/skill-v2.1.0-blue)](./SKILL.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Orca](https://img.shields.io/badge/runtime-Orca%20IDE-orange)](https://orca.app)
 
@@ -19,12 +19,15 @@ User Request → Clarify → Plan → Review → Confirm → Execute (parallel) 
 ### Key Features
 
 - **🔄 Full Lifecycle**: Requirements → Plan → Execute → Review → Merge → Cleanup
-- **🔀 Parallel Execution**: Multiple subtasks run simultaneously with internal retry loops
+- **🌳 Per-Sub-Task Worktrees (v2.1.0)**: each feature/fix gets its own branch + worktree — no cross-task contention, clean per-task diffs, individually mergeable PRs
+- **🔗 Stacked Branches (v2.1.0)**: dependent sub-tasks branch off parent tips (not `main`), preserving parallelism; auto-rebase onto `main` when the parent PR merges
+- **🆕 Fresh Agent Per Round (v2.1.0)**: implementation, cross-review, and fix each run in a **fresh terminal** — no Agent context reuse, no carry-over bias
+- **🧑‍⚖️ Cross-Agent Review**: reviews use a different Agent (`pi`) than implementation (`claude`/`kimi`), per `docs/agent-routing.md`
 - **🛡️ Hard Cycle Caps**: Every loop has a maximum iteration count — no infinite retries
-- **👤 Human-in-the-Loop**: Escalation at plan-review and merge-conflict boundaries only
-- **📉 Degraded Delivery**: When retries exhaust, completed artifacts are delivered; failures are flagged
-- **🔍 Full Audit Trail**: Every decision, gate, and transition is logged to `.orca/workflow-state.json`
-- **🔒 PR-Only Merge**: No direct `git merge` — all integrations go through pull requests
+- **👤 Human-in-the-Loop**: Escalation at plan-review and per-sub-task merge-conflict boundaries only
+- **📉 Degraded Delivery**: When retries exhaust, completed sub-tasks ship independently; failed sub-tasks get per-sub-task parked manifests
+- **🔍 Full Audit Trail**: Every decision, gate, terminal spawn, and PR transition is logged to `.orca/workflow-state.json` (with `subtask_id` scope since v2.1.0)
+- **🔒 PR-Only Merge**: No direct `git merge` — each sub-task integrates through its own PR; dependent PRs flip base to `main` via the §11.8 stacked-PR rebase hook
 
 ---
 
@@ -76,30 +79,31 @@ The coordinator agent will prompt you through each phase — starting with requi
 
 ---
 
-## Architecture
+## Architecture (v2.1.0)
 
 ```
-┌──────────────────────────────────────────────┐
-│               COORDINATOR                     │
-│  Phase 1 → Phase 2 → Phase 3 → Phase 4       │
-│  Gather    Plan+Rev  Confirm   Dispatch       │
-│                                      │        │
-│                         ┌────────────┼────┐   │
-│                         │   WORKERS (parallel)│
-│                         │  Sub-1  Sub-2  Sub-3│
-│                         │  +Review +Review    │
-│                         └────────────┼────┘   │
-│  Phase 6 ← Collect All ←────────────┘        │
-│  Decide                                       │
-│     │                                         │
-│  Phase 7 → Phase 8 → Done                    │
-│  PR/Merge  Cleanup                            │
-└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                     COORDINATOR (This Agent)                      │
+│  Phase 1 → Phase 2 → Phase 3 → Phase 4 (per-sub-task worktrees)  │
+│                                      │                            │
+│                              ┌───────┼─────────┐                  │
+│                              │  Sub-1 wt+br  Sub-2 wt+br         │
+│                              │  base=main    base=sub-1           │
+│                              │  ↓            ↓                   │
+│                              │  exec₀        exec₀                │
+│                              │  review₁      review₁              │
+│                              │  fix₂         done                 │
+│                              │  review₃                            │
+│                              └───────┬─────────┘                  │
+│  Phase 6 ← Collect (all verdicts) ┘                              │
+│  Phase 7 (per-sub-task PR, topo order) → §11.8 stacked rebase    │
+│  Phase 8 (per-sub-task cleanup, reverse-topo) → Done              │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ### State Machine
 
-8 states with defined transitions, 3 terminal exits (plan non-convergence, user rejection, subtask failure), degraded delivery path, and parked-workflow archiving.
+8 phases with per-sub-task subgraph under `DISPATCHING` / `EXECUTING` / `MERGING` / `CLEANING`. Terminal exits: plan non-convergence, user rejection, sub-task failure (per-sub-task PARKED is recoverable).
 
 See [`docs/workflow.md`](./docs/workflow.md) for the full Mermaid diagram.
 
@@ -112,11 +116,11 @@ See [`docs/workflow.md`](./docs/workflow.md) for the full Mermaid diagram.
 | 1 | **Gathering** | Clarify requirements with the user | `orca orchestration ask` |
 | 2 | **Planning** | Generate technical plan, review it (max 3 rounds) | `task-create` + `dispatch` + `gate-create` |
 | 3 | **Confirming** | User approves the plan (max 3 rounds) | `orca orchestration ask` |
-| 4 | **Dispatching** | Decompose into subtask DAG, create worktree, dispatch | `task-create` + `dispatch` |
-| 5 | **Executing** | Workers run in parallel with internal retry (max 3) | Workers self-manage |
-| 6 | **Deciding** | Collect all results, decide: retry / degrade / escalate | `task-list` + `ask` |
-| 7 | **Merging** | Check conflicts, create PR, monitor until merge | `gh pr create` + `gate-create` |
-| 8 | **Cleaning** | Remove worktree, archive, notify user | `orca worktree remove` |
+| 4 | **Dispatching** | **Per-sub-task**: create wt+branch (stacked on parent or main), spawn fresh execution terminal | `worktree create` + `terminal create` + `task-create` + `dispatch` |
+| 5 | **Executing** | **Per-round cross-review**: round > 0 spawns fresh fix + review terminals | `terminal create` + `dispatch` + `terminal close` |
+| 6 | **Deciding** | Collect all per-sub-task verdicts, decide retry / degrade / escalate | `task-list` + `ask` |
+| 7 | **Merging** | **Per-sub-task PR** in topo order; §11.8 stacked-PR rebase hook flips dependent PRs to `main` after parent merges | `gh pr create` + `gh pr edit --base` + `gate-create` |
+| 8 | **Cleaning** | **Per-sub-task** reverse-topo cleanup: delete branch, remove worktree, close `keep_terminal`, write per-sub-task park manifest if needed | `worktree remove` + `terminal close` |
 
 ---
 
@@ -128,9 +132,15 @@ All parameters are tunable via environment variables:
 export ORCA_WORKFLOW_MAX_REVIEW_ROUNDS=3      # Plan review retries
 export ORCA_WORKFLOW_MAX_ESCALATE=2           # Human escalations before terminate
 export ORCA_WORKFLOW_MAX_USER_CONFIRM=3        # User confirmation retries
-export ORCA_WORKFLOW_MAX_SUB_RETRY=3           # Per-subtask retries
+export ORCA_WORKFLOW_MAX_SUB_RETRY=3           # Per-sub-task cross-review rounds
 export ORCA_WORKFLOW_MAX_GLOBAL_RETRY=2        # Full-batch retry rounds
-export ORCA_WORKFLOW_MAX_AUTOFIX=2             # Auto conflict-resolution attempts
+export ORCA_WORKFLOW_MAX_AUTOFIX=2             # Auto conflict-resolution attempts (per-sub-task, in §11.4 / §11.8)
+
+# v2.1.0 — branch strategy & per-role terminals
+export ORCA_WORKFLOW_BRANCH_STRATEGY=stacked              # stacked | serial (default stacked)
+export ORCA_WORKFLOW_BRANCH_TEMPLATE='feature/{workflow_slug}/{sub_slug}-{timestamp}'
+export ORCA_WORKFLOW_WORKTREE_PATH_TEMPLATE='../{workflow_slug}-{sub_slug}'
+export ORCA_WORKFLOW_MAX_TERMINALS_PER_SUBTASK=8          # hard cap on review+fix terminal count
 ```
 
 See [`SKILL.md#4-configuration`](./SKILL.md#4-configuration) for the full configuration reference.

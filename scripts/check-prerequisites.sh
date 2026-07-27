@@ -76,12 +76,25 @@ fi
 #    SKILL.md §3.1 marks this as FATAL by default, but solo / dry-run runs are
 #    legitimately valid without a worker pool. Set ORCA_WORKFLOW_STRICT_PREREQ=true
 #    to enforce the FATAL policy; default is WARN to keep local smoke-tests working.
+#
+#    v2.1.0: each sub-task gets its own first execution terminal in Phase 4,
+#    plus per-round review + fix terminals in Phase 5. A workflow with N
+#    sub-tasks and ~2 review rounds each can need up to 3N terminals
+#    concurrently. ORCA_WORKFLOW_MIN_WORKERS lets ops/CI assert the lower
+#    bound for their expected parallelism (default 1, recommended 3+).
 echo "--- Worker Terminals ---"
 STRICT_PREREQ="${ORCA_WORKFLOW_STRICT_PREREQ:-false}"
+MIN_WORKERS="${ORCA_WORKFLOW_MIN_WORKERS:-1}"
 if command -v orca &>/dev/null; then
   WORKER_COUNT=$(orca terminal list --json 2>/dev/null | jq '[.result.terminals[]? | select(.type == "worker" or .tags[]? == "worker")] | length' 2>/dev/null || echo "0")
-  if [ "$WORKER_COUNT" -ge 1 ]; then
-    pass "$WORKER_COUNT worker terminal(s) available"
+  if [ "$WORKER_COUNT" -ge "$MIN_WORKERS" ]; then
+    pass "$WORKER_COUNT worker terminal(s) available (min requested: $MIN_WORKERS)"
+  elif [ "$WORKER_COUNT" -ge 1 ]; then
+    if [ "$STRICT_PREREQ" = "true" ]; then
+      fail "Only $WORKER_COUNT worker terminal(s) available; need at least $MIN_WORKERS for v2.1.0 sub-task parallelism. Create more: orca terminal create --type worker"
+    else
+      warn "Only $WORKER_COUNT worker terminal(s); ORCA_WORKFLOW_MIN_WORKERS=$MIN_WORKERS — sub-tasks will run more serially than expected. Create more for full parallelism: orca terminal create --type worker"
+    fi
   else
     if [ "$STRICT_PREREQ" = "true" ]; then
       fail "No worker terminals found. Create one: orca terminal create --type worker (set ORCA_WORKFLOW_STRICT_PREREQ=false to allow solo runs)"
@@ -92,6 +105,17 @@ if command -v orca &>/dev/null; then
 else
   warn "Cannot check worker terminals (Orca not available)"
 fi
+
+# 5b. Branch strategy soft check (v2.1.0)
+#     stacked mode requires per-sub-task worktrees; serial mode falls back
+#     to one worktree at a time. Modern git (>= 2.30) supports multiple
+#     worktrees without issue, so this is informational only.
+echo "--- Branch Strategy ---"
+BRANCH_STRATEGY="${ORCA_WORKFLOW_BRANCH_STRATEGY:-$(jq -r '.workflow.branch_strategy.mode // "stacked"' .orca/workflow-config.json 2>/dev/null || echo "stacked")}"
+case "$BRANCH_STRATEGY" in
+  stacked|serial) pass "branch_strategy=$BRANCH_STRATEGY" ;;
+  *)             fail "Unknown ORCA_WORKFLOW_BRANCH_STRATEGY=$BRANCH_STRATEGY (expected: stacked | serial)" ;;
+esac
 
 # 6. Git working directory
 echo "--- Working Directory ---"

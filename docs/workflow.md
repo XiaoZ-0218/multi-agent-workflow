@@ -1,7 +1,12 @@
 # Workflow State Diagram
 
-> Full Mermaid flowchart for the Multi-Agent Orchestration Workflow v2.0.0.
+> Full Mermaid flowchart for the Multi-Agent Orchestration Workflow **v2.1.0**.
 > Rendering: paste this into any Mermaid-compatible viewer (GitHub, Mermaid Live, Obsidian).
+>
+> v2.1.0 key change: each sub-task owns its own worktree + branch + set of fresh
+> terminals. Dependent sub-tasks are **stacked** on their parent's branch until
+> the parent PR merges — at which point the §11.8 rebase hook flips the
+> dependent PR's base to `main`.
 
 ```mermaid
 graph TD
@@ -19,7 +24,7 @@ graph TD
         Q2 -->|Retries exhausted| Escalate[Escalate to Human<br/>orca orchestration ask]
         Escalate --> EscCnt{Escalation count?}
         EscCnt -->|≤ MAX_ESCALATE| DocGen
-        EscCnt -->|> MAX_ESCALATE| Terminate1["❌ TERMINATED<br/>Plan cannot converge<br/>Recommend human-led approach"]
+        EscCnt -->|> MAX_ESCALATE| Terminate1["❌ TERMINATED<br/>Plan cannot converge"]
     end
 
     Q2 -->|Yes| Confirm[Phase 3: User Confirmation<br/>Present plan summary]
@@ -28,80 +33,92 @@ graph TD
     Feedback --> DocGen
     Q3 -->|Retries exhausted| ForceChoice{Force decision}
     ForceChoice -->|Continue revising| DocGen
-    ForceChoice -->|Terminate| Terminate2["❌ TERMINATED<br/>Directional misalignment<br/>too large to resolve"]
-    Q3 -->|Yes| Plan[Phase 4: Task Decomposition<br/>Generate subtask DAG]
+    ForceChoice -->|Terminate| Terminate2["❌ TERMINATED<br/>Directional misalignment"]
+    Q3 -->|Yes| Plan[Phase 4: Task Decomposition<br/>Generate sub-task DAG]
 
-    Plan --> BranchExist{Worktree/branch<br/>already exists?}
-    BranchExist -->|No| CreateBranch[Create feature branch<br/>orca worktree create]
-    BranchExist -->|Yes, reuse| Dispatch
-    CreateBranch --> Dispatch[Phase 4: Dispatch<br/>task-create + dispatch all subtasks]
+    Plan --> DispatchLoop{For each sub-task<br/>in topo order}
+    DispatchLoop -->|sub-N| CreateWT[Phase 4: Create worktree + branch<br/>base = main or parent branch<br/>orca worktree create]
+    CreateWT --> SpawnFirst[Phase 4: Spawn FRESH execution terminal<br/>tagged with sub-task's complexity Agent<br/>orca terminal create]
+    SpawnFirst --> Dispatch[Phase 4: Dispatch implementation spec<br/>orca orchestration dispatch]
+    SpawnFirst -.record.-> State1[(state.tasks.subtasks sub-N<br/>worktree_path, branch_name,<br/>keep_terminal, base_branch)]
 
-    subgraph ParallelExec ["Phase 5: Parallel Execution (each subtask: max 3 internal retries)"]
-        Dispatch --> Sub1[Worker 1: Research]
-        Sub1 --> SubReview1[Self-Review]
-        SubReview1 --> SubCheck1{Pass?<br/>Retries ≤ MAX_SUB_RETRY}
-        SubCheck1 -->|No, retries remain| Sub1
-        SubCheck1 -->|Retries exhausted| SubFail1[Mark FAIL + reason]
-        SubCheck1 -->|Yes| SubDone1["✅ Artifact 1"]
-
-        Dispatch --> Sub2[Worker 2: Writing]
-        Sub2 --> SubReview2[Self-Review]
-        SubReview2 --> SubCheck2{Pass?<br/>Retries ≤ MAX_SUB_RETRY}
-        SubCheck2 -->|No, retries remain| Sub2
-        SubCheck2 -->|Retries exhausted| SubFail2[Mark FAIL + reason]
-        SubCheck2 -->|Yes| SubDone2["✅ Artifact 2"]
-
-        Dispatch --> Sub3[Worker 3: Graphics]
-        Sub3 --> SubReview3[Self-Review]
-        SubReview3 --> SubCheck3{Pass?<br/>Retries ≤ MAX_SUB_RETRY}
-        SubCheck3 -->|No, retries remain| Sub3
-        SubCheck3 -->|Retries exhausted| SubFail3[Mark FAIL + reason]
-        SubCheck3 -->|Yes| SubDone3["✅ Artifact 3"]
+    subgraph SubA ["Sub-task A (deps-less): branch base = main"]
+        Dispatch --> SubA_Impl[Sub-A Round 0: Implementation<br/>execution terminal]
+        SubA_Impl --> SubA_Review[Sub-A Round 0: Cross-Review<br/>FRESH review terminal<br/>tagged review Agent]
+        SubA_Review --> SubA_Q{Pass?}
+        SubA_Q -->|Yes| SubA_Done["✅ Sub-A complete"]
+        SubA_Q -->|No| SubA_Fix[Sub-A Round 1: Fix<br/>FRESH execution terminal<br/>tagged execution Agent]
+        SubA_Fix --> SubA_Review2[Sub-A Round 1: Re-Review<br/>FRESH review terminal]
+        SubA_Review2 --> SubA_Q2{Pass?}
+        SubA_Q2 -->|Yes| SubA_Done
+        SubA_Q2 -->|No, budget left| SubA_Fix
+        SubA_Q2 -->|No, budget gone| SubA_Fail["❌ Sub-A FAIL"]
     end
 
-    SubDone1 --> Collect[Phase 6: Collect All Results<br/>Wait for all workers done]
-    SubFail1 --> Collect
-    SubDone2 --> Collect
-    SubFail2 --> Collect
-    SubDone3 --> Collect
-    SubFail3 --> Collect
+    subgraph SubB ["Sub-task B (deps on A): branch base = Sub-A's branch (stacked)"]
+        SpawnFirstB[Phase 4: Sub-B wt+branch based on A<br/>FRESH execution terminal]
+        DispatchB[Phase 4: Dispatch sub-B spec]
+        SpawnFirstB --> DispatchB
+        SpawnFirstB -.record.-> State2[(state.tasks.subtasks sub-B<br/>worktree_path, branch_name,<br/>base_branch = A's branch)]
+
+        DispatchB --> SubB_Impl[Sub-B Round 0: Implementation<br/>in sub-B worktree]
+        SubB_Impl --> SubB_Review[Sub-B Round 0: Cross-Review<br/>FRESH review terminal]
+        SubB_Review --> SubB_Q{Pass?}
+        SubB_Q -->|Yes| SubB_Done["✅ Sub-B complete (waiting for A to merge)"]
+        SubB_Q -->|No| SubB_Fix[Sub-B Round 1: Fix<br/>FRESH execution terminal]
+        SubB_Fix --> SubB_Review2[Sub-B Round 1: Re-Review<br/>FRESH review terminal]
+        SubB_Review2 --> SubB_Q2{Pass?}
+        SubB_Q2 -->|Yes| SubB_Done
+        SubB_Q2 -->|No, budget left| SubB_Fix
+        SubB_Q2 -->|No, budget gone| SubB_Fail["❌ Sub-B FAIL"]
+    end
+
+    SubA_Done --> Collect[Phase 6: Collect All Sub-task Verdicts]
+    SubB_Done --> Collect
+    SubA_Fail --> Collect
+    SubB_Fail --> Collect
 
     Collect --> Analyze[Phase 6: Analyze Results]
-    Analyze --> AllOK{All subtasks<br/>passed?}
-    AllOK -->|Yes| Prep
+    Analyze --> AllOK{All sub-tasks<br/>passed?}
+    AllOK -->|Yes| TopoMerge[Phase 7: Per-sub-task PR<br/>in topological order]
     AllOK -->|No| RetryDecision{Retry strategy?<br/>Global retries ≤ MAX_GLOBAL_RETRY}
-    RetryDecision -->|Retry failed, retries remain| Dispatch
-    RetryDecision -->|Degrade delivery| PartialOK[Mark: partial delivery<br/>Passed items shipped<br/>Failed flagged for manual]
+    RetryDecision -->|Retry failed, retries remain| DispatchLoop
+    RetryDecision -->|Degrade delivery| PartialOK[Mark: partial delivery<br/>Passed sub-tasks ship<br/>Failed sub-tasks flagged]
     RetryDecision -->|Retries exhausted, escalate| EscalateSub[Escalate to Human<br/>orca orchestration ask]
     EscalateSub --> HumanSubDecision{Human decision}
-    HumanSubDecision -->|Provide direction| Dispatch
+    HumanSubDecision -->|Provide direction| DispatchLoop
     HumanSubDecision -->|Accept partial delivery| PartialOK
-    HumanSubDecision -->|Abort| Terminate3["❌ TERMINATED<br/>Subtask(s) cannot<br/>be completed"]
-    PartialOK --> Prep
+    HumanSubDecision -->|Abort| Terminate3["❌ TERMINATED<br/>Sub-task(s) cannot<br/>be completed"]
+    PartialOK --> TopoMerge
 
-    Prep[Phase 7: Generate Change Summary<br/>Artifacts, diffs, verification]
+    TopoMerge --> SubAPR[Phase 7: Sub-A<br/>rebase onto main<br/>push, gh pr create<br/>base = main]
+    SubAPR --> SubAPoll{Sub-A PR status?}
+    SubAPoll -->|Changes requested| SubAFix[Sub-A PR-fix<br/>FRESH execution terminal<br/>commit + push]
+    SubAFix --> SubAPoll
+    SubAPoll -->|Merged| SubAOnMerge[/§11.8 Stacked-PR Hook:<br/>for each dependent of A: rebase<br/>onto main, gh pr edit --base main,<br/>gh pr ready/]
 
-    Block{Merge pre-checks<br/>Conflicts? Permissions?}
-    Block -->|Conflicts detected| AutoFix[Attempt auto-resolution<br/>max MAX_AUTOFIX attempts]
-    AutoFix --> FixOK{Resolution<br/>successful?}
-    FixOK -->|Yes| Block
-    FixOK -->|No| DeliverBlock[Deliver to Human<br/>with conflict details]
-    Block -->|Permission denied /<br/>validation failed| DeliverBlock
-    Block -->|Passed| CreatePR[Phase 7: Create PR<br/>gh pr create]
+    SubAOnMerge --> SubBPR[Phase 7: Sub-B (was draft)<br/>now: rebase onto main<br/>gh pr edit --base main<br/>gh pr ready]
+    SubBPR --> SubBPoll{Sub-B PR status?}
+    SubBPoll -->|Changes requested| SubBFix[Sub-B PR-fix<br/>FRESH execution terminal]
+    SubBFix --> SubBPoll
+    SubBPoll -->|Merged| SubBDone["✅ Sub-B complete"]
+    SubBPoll -->|Closed| SubBPark["🅿️ Sub-B PARKED<br/>per-sub-task manifest written"]
+    SubAPoll -->|Closed| SubAPark["🅿️ Sub-A PARKED<br/>per-sub-task manifest written"]
 
-    DeliverBlock --> HumanSolve{Human resolves}
-    HumanSolve -->|Resolved| Block
-    HumanSolve -->|Abort| Park
+    SubADone[Sub-A merged]
+    SubADone --> CleanupLoop
+    SubBDone --> CleanupLoop
+    SubAPark --> CleanupLoop
+    SubBPark --> CleanupLoop
 
-    CreatePR --> PRWait{PR status?}
-    PRWait -->|Review feedback| FixPR[Address feedback<br/>push to same branch]
-    FixPR --> PRWait
-    PRWait -->|Merged| Cleanup[Phase 8: Cleanup<br/>orca worktree remove]
-    PRWait -->|Closed| Park[Phase 8: Park<br/>Archive branch & worktree<br/>Write recovery manifest]
+    CleanupLoop{For each sub-task<br/>in REVERSE-topo order}
+    CleanupLoop -->|merged| CleanMerge[Phase 8: delete remote branch<br/>+ orca worktree remove<br/>+ orca terminal close keep_terminal]
+    CleanupLoop -->|parked| CleanPark[Phase 8: write .orca/parked/&lt;sub&gt;.md<br/>+ orca terminal close keep_terminal]
+    CleanupLoop -->|skipped/fail| CleanDrop[Phase 8: delete branch + worktree<br/>+ orca terminal close]
 
-    Cleanup --> Final[Phase 8: Archive<br/>Record results & state]
-    Park --> ArchiveWorktree[Archive worktree<br/>Release resources]
-    ArchiveWorktree --> Final
+    CleanMerge --> Final[Phase 8: Archive<br/>Append per-sub-task history line<br/>to .orca/workflow-history.jsonl]
+    CleanPark --> Final
+    CleanDrop --> Final
     Final --> Notify[Notify User<br/>orca orchestration ask]
     Notify --> End([Done])
 ```
@@ -119,20 +136,28 @@ graph TD
 | `CONFIRMING` | User approves | `DISPATCHING` | — |
 | `CONFIRMING` | User rejects (< 3) | `PLANNING` | With feedback |
 | `CONFIRMING` | User rejects (≥ 3) | `TERMINATED` | Terminate2 |
-| `DISPATCHING` | All dispatched | `EXECUTING` | — |
-| `EXECUTING` | All workers done | `DECIDING` | — |
+| `DISPATCHING` | All sub-tasks have wt+branch+first terminal | `EXECUTING` | — |
+| `DISPATCHING.sub-N` | Worktree/branch/terminal creation failed | `TERMINATED` | Infra-only failure; per-sub-task failures don't terminate |
+| `EXECUTING.sub-N` | Cross-review PASS | `EXECUTING` (waiting on siblings) | All sub-tasks must reach terminal verdict to advance |
+| `EXECUTING.sub-N` | Round budget exhausted | `EXECUTING.sub-N` (FAIL) | Siblings continue |
+| `EXECUTING` | All sub-tasks terminal | `DECIDING` | — |
 | `DECIDING` | All passed | `MERGING` | AllOK = yes |
-| `DECIDING` | Retry (< 2) | `DISPATCHING` | Failed only |
-| `DECIDING` | Degrade | `MERGING` | PartialOK set |
+| `DECIDING` | Retry (< 2) | `DISPATCHING` | Failed sub-tasks only — get new wt+branch |
+| `DECIDING` | Degrade | `MERGING` | PartialOK set; passed sub-tasks continue to PR |
 | `DECIDING` | Human aborts | `TERMINATED` | Terminate3 |
-| `MERGING` | PR merged | `CLEANING` | — |
-| `MERGING` | PR closed | `CLEANING` | Park flag |
-| `CLEANING` | Done | `DONE` | — |
+| `MERGING.sub-N` | Parent merged → rebase + flip base | `MERGING.sub-N` (rebase) | Only if sub-task has deps (§11.8 hook) |
+| `MERGING.sub-N` | PR merged | `MERGING` (waiting on siblings) | — |
+| `MERGING.sub-N` | Auto-fix exhausted + human parks | `MERGING.sub-N` (PARKED) | Per-sub-task parking; siblings continue |
+| `MERGING` | All merged or parked | `CLEANING` | — |
+| `CLEANING.sub-N` | Branch deleted + worktree removed + keep_terminal closed | `CLEANING` (next sibling) | Reverse-topo order |
+| `CLEANING` | All sub-tasks cleaned | `DONE` | — |
 
 ## Termination Exits
 
-| Exit | Trigger Condition | Artifact State |
-|------|------------------|---------------|
-| **Terminate1** | Plan cannot pass review after 2 human escalations | No artifacts — plan was never approved |
-| **Terminate2** | User rejects plan > 3 times | No artifacts — user disagreed with direction |
-| **Terminate3** | Subtasks fail after global retry + human abort | Completed artifacts preserved; failure manifest written |
+| Exit | Trigger Condition | Per-Sub-Task State |
+|------|------------------|-------------------|
+| **Terminate1** | Plan cannot pass review after 2 human escalations | No sub-tasks started — plan was never approved |
+| **Terminate2** | User rejects plan > 3 times | No sub-tasks started — user disagreed with direction |
+| **Terminate3** | Sub-tasks fail after global retry + human abort | Completed sub-tasks preserved in their own worktrees; failed sub-tasks have per-sub-task park manifests |
+| **Per-sub-task PARKED** | Auto-fix exhausted on one sub-task | Siblings continue; that sub-task gets `.orca/parked/<sub>.md` |
+| **Workflow DONE** | All sub-tasks merged (or parked) | Each merged sub-task's branch deleted, worktree removed, keep_terminal closed |
