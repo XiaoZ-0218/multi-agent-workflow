@@ -753,10 +753,11 @@ git push origin --delete feature/add-user-prefs
 
 orca worktree rm --worktree "id:$WT_ID" --force --json   # ("worktree remove" does NOT exist)
 
-# orca worktree rm leaves the LOCAL branch behind (smoke-run finding) — delete
-# it from the coordinator's main checkout. -D not -d: a squash-merged PR means
-# the local tip is not an ancestor of main, so -d would refuse.
-git branch -D feature/add-user-prefs
+# orca worktree rm deletes the local branch only when it is fully merged —
+# an unmerged branch is left behind (verified across two v2.2.0 smoke runs).
+# Delete explicitly to cover both cases; -D not -d (a squash-merged PR's local
+# tip is not an ancestor of main); "not found" just means orca already did it.
+git branch -D feature/add-user-prefs 2>/dev/null || true
 
 orca terminal close --terminal term_s1e1 --json   # sub-1 keep_terminal
 orca terminal close --terminal term_s2e0 --json   # sub-2 keep_terminal

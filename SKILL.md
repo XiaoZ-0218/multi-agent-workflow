@@ -1399,11 +1399,13 @@ case "$PR_STATE" in
     # Full cleanup: delete remote branch, remove the worktree, close terminals
     git push origin --delete "$BRANCH" || echo "WARN: branch delete failed (may need admin)"
     orca worktree rm --worktree "id:$WT_ID" --force --json
-    # orca worktree rm removes the worktree but LEAVES the local branch (verified
-    # in the v2.2.0 smoke run) — delete it from the coordinator's main checkout.
-    # Use -D (not -d): a squash-merged PR means the local tip is not an ancestor
-    # of main, so -d would refuse.
-    git branch -D "$BRANCH" || echo "WARN: local branch delete failed"
+    # orca worktree rm removes the worktree; it deletes the local branch only
+    # when the branch is fully merged (verified across two v2.2.0 smoke runs:
+    # merged PR branch removed by orca, unmerged branch left behind). Delete
+    # it explicitly so both cases are covered. Use -D (not -d): a squash- or
+    # rebase-merged PR means the local tip is not an ancestor of main, so -d
+    # would refuse. Missing branch is fine — orca may already have removed it.
+    git branch -D "$BRANCH" 2>/dev/null || echo "INFO: local branch already gone"
     close_all_workflow_terminals      # includes keep_terminal(s)
     state_update '.phases.CLEANING.disposition = "MERGED"'
     ;;

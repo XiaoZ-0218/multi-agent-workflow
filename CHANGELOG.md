@@ -83,12 +83,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `git fetch origin`.
 - **Security section** no longer claims git-worktree filesystem
   sandboxing — sub-tasks share one worktree, so that claim was false.
-- **Phase 8 now deletes the local feature branch**: verified in the
-  v2.2.0 smoke run that `orca worktree rm --force` removes the worktree
-  but leaves the local branch behind; cleanup now runs
-  `git branch -D <branch>` from the coordinator's checkout (`-D`, not
-  `-d`, because a squash-merged PR's local tip is not an ancestor of
-  main).
+- **Phase 8 now deletes the local feature branch**: verified across two
+  v2.2.0 smoke runs that `orca worktree rm --force` removes the worktree
+  and deletes the local branch only when it is fully merged — an
+  unmerged branch is left behind. Cleanup now runs
+  `git branch -D <branch>` from the coordinator's checkout to cover both
+  cases (`-D`, not `-d`, because a squash-merged PR's local tip is not
+  an ancestor of main; "not found" means orca already removed it).
 - **`worker_done` verdict placement**: the preamble contract (§8.5) now
   requires the verdict in BOTH the message subject and the payload —
   smoke-run finding: some agents only write the subject. The
