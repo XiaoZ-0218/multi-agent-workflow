@@ -666,12 +666,13 @@ that applies even when every subtask passes.
 
 ## 8. Phase 4 — Task Decomposition & Dispatch
 
-**Goal**: Break the approved plan into a DAG of subtasks, create a feature branch/worktree, and dispatch subtasks to worker terminals.
+**Goal**: Break the approved plan into a DAG of subtasks. For **each** sub-task, create its own branch + worktree, and spawn the **first execution terminal** attached to that worktree. Stacked branches preserve parallelism when sub-tasks have dependencies.
 
 ### 8.1 Entry Condition
 
 - State: `DISPATCHING`
 - Input: Approved plan + user confirmation
+- `branch_strategy.mode` from `.orca/workflow-config.json` (default `stacked`)
 
 ### 8.2 Task Decomposition Schema
 
@@ -705,124 +706,220 @@ Each subtask must declare:
 - `"general"` 或未设置 → `execution_agent_type`
 - 所有重试耗尽 → `fallback_agent_type`（兜底）
 
-### 8.3 Process
+v2.1.0 新增：`task_role`（`execution` / `review` / `fix`）决定 *哪个* Agent 跑这一轮。`execution` 用上面的 `execution_agent_type`；`review` 强制用 `review_agent_type`（默认 `pi`）；`fix` 复用 `execution_agent_type`，并允许在 spec 里覆写为 `complex_execution_agent_type`。
+
+### 8.3 Process — per-subtask worktree + branch + first terminal
 
 ```bash
-# Step 1: Check if worktree/branch already exists
-EXISTING=$(orca worktree list --json 2>/dev/null | jq -r '.result.worktrees[] | select(.name | startswith("feature/")) | .name')
+WORKFLOW_SLUG="${TASK_SLUG}"   # from plan, e.g. "add-user-prefs"
+TS="$(date +%Y%m%d-%H%M)"
+BRANCH_TPL="${ORCA_WORKFLOW_BRANCH_TEMPLATE:-feature/{workflow_slug}/{sub_slug}-{timestamp}}"
+WT_PATH_TPL="${ORCA_WORKFLOW_WORKTREE_PATH_TEMPLATE:-../{workflow_slug}-{sub_slug}}"
 
-if [ -z "$EXISTING" ]; then
-  # Create new feature branch + worktree
-  BRANCH="feature/${TASK_SLUG}-$(date +%Y%m%d-%H%M)"
-  orca worktree create --name "$BRANCH" --base main
-  echo "Created worktree: $BRANCH"
-else
-  echo "Reusing existing worktree: $EXISTING"
-fi
+# Step 1: sort sub-tasks topologically so deps are created first
+TOPO_IDS=($(topo_sort "${SUBTASK_IDS[@]}"))
 
-# Step 2: Create orchestration tasks for each subtask
+# Step 2: for each sub-task, create its own wt+branch+terminal
 DISPATCH_FAILED=()
-for SUB in "${SUBTASK_IDS[@]}"; do
+for SUB in "${TOPO_IDS[@]}"; do
+  # 8.3.1 Resolve base branch (stacked-branches rule)
+  if [ "${#SUB_DEPS[$SUB]}" -eq 0 ]; then
+    BASE_BRANCH="main"
+  else
+    # Base off the FIRST parent's branch (linearized stacks; for diamond DAGs
+    # we rebase onto all parents in §8.4.1).
+    PARENT="${SUB_DEPS[$SUB][0]}"
+    BASE_BRANCH="${SUBTASK_BRANCH[$PARENT]}"
+  fi
+
+  SUB_SLUG="${SUB_SLUGS[$SUB]}"   # e.g. "prefs-api"
+  BRANCH="$(apply_template "$BRANCH_TPL" workflow_slug="$WORKFLOW_SLUG" sub_slug="$SUB_SLUG" timestamp="$TS")"
+  WT_PATH="$(apply_template "$WT_PATH_TPL"  workflow_slug="$WORKFLOW_SLUG" sub_slug="$SUB_SLUG")"
+
+  # 8.3.2 Create the worktree
+  git fetch origin "$BASE_BRANCH"
+  orca worktree create --name "$BRANCH" --base "origin/$BASE_BRANCH" "$WT_PATH"
+
+  # 8.3.3 Stacked: rebase onto parent tip if parent is local-only
+  if [ "$BASE_BRANCH" != "main" ] && [ "$BASE_BRANCH" != "origin/main" ]; then
+    ( cd "$WT_PATH" && git rebase "$BASE_BRANCH" ) || {
+      echo "⚠️  Failed to base $BRANCH off $BASE_BRANCH — escalating"
+      DISPATCH_FAILED+=("$SUB")
+      continue
+    }
+  fi
+
+  # 8.3.4 Spawn the FIRST execution terminal attached to this worktree
+  EXEC_AGENT_TYPE=$(resolve_agent_type "${SUB_COMPLEXITIES[$SUB]}")
+  EXEC_TERMINAL=$(orca terminal create \
+    --worktree "$BRANCH" \
+    --title "sub-$SUB r0 execution ($EXEC_AGENT_TYPE)" \
+    --command "$(agent_command_for "$EXEC_AGENT_TYPE")" \
+    --tags "$EXEC_AGENT_TYPE" \
+    --json | jq -r '.result.terminal.handle')
+
+  # 8.3.5 Create orchestration task + dispatch into the new terminal
   TASK_ID=$(orca orchestration task-create \
     --task-title "Sub: ${SUB_TITLES[$SUB]}" \
-    --display-name "🔧 ${SUB_NAMES[$SUB]}" \
+    --display-name "🔧 ${SUB_DISPLAY[$SUB]}" \
     --spec "${SUB_SPECS[$SUB]}" \
     --deps "$(echo ${SUB_DEPS[$SUB]} | jq -c '.')" \
     --json | jq -r '.result.task.id')
 
-  echo "Created subtask: $TASK_ID ($SUB)"
-
-  # Dispatch to worker (non-blocking — all dispatch in parallel)
-  WORKER=$(select_worker "${SUB_COMPLEXITIES[$SUB]}")
-  if ! orca orchestration dispatch \
+  orca orchestration dispatch \
     --task "$TASK_ID" \
-    --to "$WORKER" \
+    --to "$EXEC_TERMINAL" \
     --inject \
-    --json > "/tmp/dispatch-${TASK_ID}.json" 2>&1 & then
-    DISPATCH_FAILED+=("$SUB")
-  fi
+    --json > "/tmp/dispatch-${TASK_ID}.json" 2>&1 || DISPATCH_FAILED+=("$SUB")
+
+  # 8.3.6 Record in state so Phase 5/7/8 can find the worktree + terminal
+  record_subtask_state "$SUB" \
+    worktree_path="$WT_PATH" \
+    branch_name="$BRANCH" \
+    base_branch="$BASE_BRANCH" \
+    status="dispatched" \
+    keep_terminal="$EXEC_TERMINAL"
+
+  append_terminal_history "$SUB" \
+    handle="$EXEC_TERMINAL" \
+    role="execution" \
+    round=0 \
+    agent_type="$EXEC_AGENT_TYPE"
 
   SUBTASK_MAP["$SUB"]="$TASK_ID"
 done
 
-wait  # All dispatches fired
-
 if [ "${#DISPATCH_FAILED[@]}" -gt 0 ]; then
-  echo "⚠️  Dispatch failed for: ${DISPATCH_FAILED[*]}"
-  # Surface to coordinator for Phase 6 decision; do NOT abort silently.
+  echo "⚠️  Phase 4 dispatch failed for: ${DISPATCH_FAILED[*]}"
   echo "DISPATCH_FAILED=${DISPATCH_FAILED[*]}" >> "$STATE_FILE"
 fi
 ```
 
 ### 8.4 Worker Selection Logic
 
-```bash
-# Agent 偏好定义在 docs/agent-routing.md，通过环境变量注入到此函数
-select_worker() {
-  local task_type="${1:-general}"
-  local agent_type
+`select_worker` now resolves **two** things at once: which **Agent** to run (via `task_type`) and which **role** (via `task_role`). The result is a *new* terminal per call — never a reuse.
 
-  case "$task_type" in
-    complex) agent_type="${ORCA_WORKFLOW_COMPLEX_EXECUTION_AGENT}" ;;
-    image)   agent_type="${ORCA_WORKFLOW_IMAGE_AGENT}" ;;
-    *)       agent_type="${ORCA_WORKFLOW_EXECUTION_AGENT}" ;;
+```bash
+# Returns: {handle, agent_type} of a freshly-spawned terminal for this role.
+spawn_terminal_for_role() {
+  local sub_id="$1"
+  local task_type="${2:-general}"
+  local task_role="${3:-execution}"     # execution | review | fix
+  local round="${4:-0}"
+
+  case "$task_role" in
+    review)    agent_type="${ORCA_WORKFLOW_REVIEW_AGENT}" ;;
+    fix)
+      # Fix rounds may escalate to the complex-execution Agent if the spec
+      # marks the sub-task as complex.
+      if [ "${SUB_COMPLEXITIES[$sub_id]}" = "complex" ]; then
+        agent_type="${ORCA_WORKFLOW_COMPLEX_EXECUTION_AGENT}"
+      else
+        agent_type="${ORCA_WORKFLOW_EXECUTION_AGENT}"
+      fi
+      ;;
+    *)
+      # execution round (round 0)
+      case "$task_type" in
+        complex) agent_type="${ORCA_WORKFLOW_COMPLEX_EXECUTION_AGENT}" ;;
+        image)   agent_type="${ORCA_WORKFLOW_IMAGE_AGENT}" ;;
+        *)       agent_type="${ORCA_WORKFLOW_EXECUTION_AGENT}" ;;
+      esac
+      ;;
   esac
 
-  # 匹配对应标签的 worker 终端，无匹配则取第一个可用
-  orca terminal list --json | jq -r --arg type "$agent_type" '
-    [.result.terminals[] | select(.tags[]? == $type)] | if length > 0 then .[0].handle
-    else .result.terminals[0].handle end
-  '
+  # Match a tagged worker terminal — if none tagged, fall back to the first
+  # available. The terminal may still need to be created if the pool is empty.
+  local handle
+  handle=$(orca terminal list --json | jq -r --arg type "$agent_type" --arg role "$task_role" '
+    [.result.terminals[] | select(.tags[]? == $type or .tags[]? == $role)] | .[0].handle // .result.terminals[0].handle
+  ')
+
+  # v2.1.0: spawn a NEW terminal every time. The dispatch layer reuses the
+  # handle only for routing; the runtime context inside is fresh.
+  local branch="${SUBTASK_BRANCH[$sub_id]}"
+  local new_handle
+  new_handle=$(orca terminal create \
+    --worktree "$branch" \
+    --title "sub-$sub_id r$round $task_role ($agent_type)" \
+    --command "$(agent_command_for "$agent_type")" \
+    --tags "$agent_type,$task_role" \
+    --json | jq -r '.result.terminal.handle')
+
+  echo "$new_handle $agent_type"
 }
 ```
 
-#### 报错兜底逻辑
+#### 报错兜底逻辑（per-subtask, per-round）
 
-通用任务失败后按优先级链重试（Agent 列表由 `docs/agent-routing.md` 定义）：
+通用任务失败后按优先级链 **开新终端** 重试。Agent 列表由 `docs/agent-routing.md` 定义：
 
 ```bash
 retry_with_fallback() {
-  local task_id="$1"
+  local sub_id="$1"
+  local task_id="$2"
+  local task_type="${3:-general}"
   # 从环境变量读取兜底链，格式: "agent1,agent2,agent3"
   IFS=',' read -ra agents <<< "${ORCA_WORKFLOW_FALLBACK_CHAIN:-}"
 
   for agent in "${agents[@]}"; do
-    WORKER=$(select_worker_by_tag "$agent")
-    orca orchestration dispatch --task "$task_id" --to "$WORKER" --inject --json
+    # Spawn a FRESH terminal tagged with this fallback agent
+    local handle branch
+    handle=$(orca terminal create \
+      --worktree "${SUBTASK_BRANCH[$sub_id]}" \
+      --title "sub-$sub_id fallback ($agent)" \
+      --command "$(agent_command_for "$agent")" \
+      --tags "$agent,fallback" \
+      --json | jq -r '.result.terminal.handle')
+
+    orca orchestration dispatch --task "$task_id" --to "$handle" --inject --json
     wait_for_worker "$task_id"
 
     if [[ "$(get_task_verdict "$task_id")" == "PASS" ]]; then
+      append_terminal_history "$sub_id" handle="$handle" role="fallback" round=-1 agent_type="$agent"
       return 0
     fi
+    orca terminal close --handle "$handle"   # failed fallback terminal torn down
     echo "⚠️ $agent failed, trying next..."
   done
 
-  echo "❌ All agents exhausted for $task_id"
+  echo "❌ All agents exhausted for sub-$sub_id"
   return 1
 }
 ```
 
-### 8.5 Injected Preamble (sent to each worker)
+### 8.5 Injected Preamble (sent to each fresh terminal)
 
-Each worker receives this preamble via `dispatch --inject`:
+Every terminal — whether round-0 execution, review, fix, or fallback — receives the same preamble shape via `dispatch --inject`. The `Role` and `Round` lines are filled in per the spawning call:
 
 ```text
-You are executing subtask "{title}" as part of a multi-agent workflow.
+You are executing subtask "{title}" (sub-{sub_id}) as part of a multi-agent workflow.
+
+Role: {execution | review | fix | fallback}
+Round: {round}
+Worktree: {worktree_path} (branch {branch_name})
+Base: {base_branch}
 
 ## Rules
-1. You have up to {MAX_SUB_RETRY} attempts to produce a passing artifact.
-2. After each attempt, self-review against these criteria:
-   {review_criteria}
-3. If you pass: set status=completed with result={"verdict":"PASS","artifact":"path"}
-4. If you fail after {MAX_SUB_RETRY} attempts: set status=completed with result={"verdict":"FAIL","reason":"...","retries":{MAX_SUB_RETRY}}
-5. Do NOT alert the coordinator on failure — the coordinator collects all results.
-6. When done, emit worker_done per your terminal's preamble protocol.
+1. You are ONE round of a sub-task. Other rounds — including cross-review — are
+   spawned as separate terminals by the coordinator; do NOT try to review your
+   own output.
+2. If you are execution/fix: produce the artifact in the worktree above, then
+   set status=completed with result={"verdict":"PASS","artifact":"path"}.
+   If you are review: cross-review the latest commits/files in the worktree
+   against {review_criteria}, then set status=completed with
+   result={"verdict":"PASS"} or {"verdict":"FAIL","reason":"..."}.
+3. Do NOT alert the coordinator on failure — the coordinator collects all results.
+4. When done, emit worker_done per your terminal's preamble protocol.
 
 ## Context
 {plan_summary}
 
 ## Your Task
 {spec}
+
+## Previous round feedback (review/fix only)
+{prior_feedback}
 ```
 
 ### 8.6 Output
@@ -831,13 +928,29 @@ You are executing subtask "{title}" as part of a multi-agent workflow.
 {
   "phase": "DISPATCHING",
   "status": "complete",
-  "branch": "feature/my-task-20260726-1030",
   "subtasks": [
-    {"id": "sub-1", "orchestration_id": "task_xxx", "worker": "term_yyy"},
-    {"id": "sub-2", "orchestration_id": "task_aaa", "worker": "term_bbb"},
-    {"id": "sub-3", "orchestration_id": "task_ccc", "worker": "term_ddd"}
+    {
+      "id": "sub-1",
+      "logical_id": "prefs-api",
+      "orchestration_id": "task_xxx",
+      "worktree_path": "../add-user-prefs-prefs-api",
+      "branch_name": "feature/add-user-prefs/prefs-api-20260727-1030",
+      "base_branch": "main",
+      "keep_terminal": "term_yyy",
+      "terminals": [{"handle":"term_yyy","role":"execution","round":0,"agent_type":"claude"}]
+    },
+    {
+      "id": "sub-2",
+      "logical_id": "prefs-ui",
+      "orchestration_id": "task_aaa",
+      "worktree_path": "../add-user-prefs-prefs-ui",
+      "branch_name": "feature/add-user-prefs/prefs-ui-20260727-1030",
+      "base_branch": "feature/add-user-prefs/prefs-api-20260727-1030",
+      "keep_terminal": "term_bbb",
+      "terminals": [{"handle":"term_bbb","role":"execution","round":0,"agent_type":"claude"}]
+    }
   ],
-  "timestamp": "2026-07-26T10:25:00Z"
+  "timestamp": "2026-07-27T10:30:00Z"
 }
 ```
 
@@ -845,63 +958,116 @@ You are executing subtask "{title}" as part of a multi-agent workflow.
 
 ## 9. Phase 5 — Parallel Execution & Sub-Review
 
-**Goal**: Each subtask executes independently with internal retry logic. The coordinator does NOT intervene until all workers report done.
+**Goal**: Each sub-task independently goes through a **per-round cross-review** loop. **Every round spawns a fresh terminal** in the sub-task's worktree — no Agent context is reused across rounds. The coordinator does not intervene until all sub-tasks reach a terminal verdict.
 
 ### 9.1 Entry Condition
 
 - State: `EXECUTING`
-- Workers are running independently
+- Every sub-task has `worktree_path`, `branch_name`, `base_branch`, and a `keep_terminal` (round-0 execution terminal) recorded in state from Phase 4
 
-### 9.2 Worker-Side Logic (injected in preamble)
+### 9.2 Per-Sub-Task Round Loop
 
 ```
-sub_retry = 0
-MAX_SUB_RETRY = 3
+MAX_SUB_RETRY = ORCA_WORKFLOW_MAX_SUB_RETRY  (default 3)
 
-while sub_retry < MAX_SUB_RETRY:
-    artifact = execute_subtask(spec, plan_context)
+For each sub-task (parallel across sub-tasks):
 
-    review = self_review(artifact, review_criteria)
-    if review.passed:
-        task_update(status="completed", result={
-            "verdict": "PASS",
-            "artifact": artifact.path,
-            "retries": sub_retry
-        })
-        emit worker_done
-        break
+  round = 0
+  last_verdict = null
+  last_feedback = null
 
-    sub_retry += 1
-    if sub_retry < MAX_SUB_RETRY:
-        incorporate_review_feedback(review.feedback)
+  while round <= MAX_SUB_RETRY:
+    if round == 0:
+      # Round 0's execution terminal was created in Phase 4 and dispatched
+      # there. Wait for it; don't spawn a new one.
+      exec_handle = subtask.keep_terminal
+      role = "execution"
+      task_id = subtask.orchestration_id
     else:
-        task_update(status="completed", result={
-            "verdict": "FAIL",
-            "reason": review.feedback,
-            "retries": sub_retry
-        })
-        emit worker_done
+      # Subsequent rounds: ALWAYS spawn a fresh terminal
+      exec_handle, exec_agent = spawn_terminal_for_role(
+        sub_id=subtask.id,
+        task_type=subtask.complexity,
+        task_role="fix",         # round > 0 means fix-after-review
+        round=round,
+      )
+      role = "fix"
+      task_id = f"fix-{subtask.id}-r{round}"
+      subtask.keep_terminal = exec_handle   # newest implementation wins
+      append_terminal_history(subtask.id, handle=exec_handle, role="execution", round=round, agent_type=exec_agent)
+
+    # Dispatch (or wait, for round 0) and block until verdict
+    if round > 0:
+      dispatch_and_wait(
+        task_id=task_id,
+        to=exec_handle,
+        spec=build_fix_spec(subtask, last_feedback),
+        timeout_ms=subtask.timeout_ms,
+      )
+    else:
+      wait_for_worker(task_id, timeout_ms=subtask.timeout_ms)
+
+    close_intermediate_terminals_for_round(subtask.id, role)   # not the keep_terminal
+
+    # ---- Cross-review: a fresh terminal with the review agent ----
+    review_handle, review_agent = spawn_terminal_for_role(
+      sub_id=subtask.id,
+      task_type="general",
+      task_role="review",
+      round=round,
+    )
+    append_terminal_history(subtask.id, handle=review_handle, role="review", round=round, agent_type=review_agent)
+
+    review_task_id = f"review-{subtask.id}-r{round}"
+    review_verdict = dispatch_and_wait(
+      task_id=review_task_id,
+      to=review_handle,
+      spec=build_review_spec(subtask, latest_diff=subtask.worktree_path),
+      timeout_ms=subtask.timeout_ms,
+    )
+    orca terminal close --handle "$review_handle"   # reviewer is read-only; torn down after verdict
+
+    if review_verdict == "PASS":
+      last_verdict = "PASS"
+      break
+    else:
+      last_feedback = review_verdict.reason
+      round += 1
+      if round > MAX_SUB_RETRY:
+        last_verdict = "FAIL"
+        break
+      # Loop continues: fresh execution terminal will be spawned at the top
+
+  record_subtask_state(subtask.id, status="completed", verdict=last_verdict, review_rounds=round)
 ```
+
+**Key invariants**:
+- Round 0's execution terminal is reused from Phase 4 (no double-spawn).
+- Every round > 0 spawns a **fresh** execution terminal tagged with the fix Agent.
+- Every round's review terminal is a **fresh** terminal tagged with the review Agent.
+- Reviewer terminals are torn down after verdict — they don't carry state.
+- The most recent execution terminal is `keep_terminal` and survives until Phase 8.
 
 ### 9.3 Coordinator-Side Wait
 
-```bash
-# Poll all subtask statuses until all are terminal (completed or failed)
-while true; do
-  ALL_DONE=true
-  for TASK_ID in "${SUBTASK_ORCH_IDS[@]}"; do
-    STATUS=$(orca orchestration task-list --json | jq -r --arg id "$TASK_ID" \
-      '.result.tasks[] | select(.id == $id) | .status')
-    if [[ "$STATUS" != "completed" && "$STATUS" != "failed" ]]; then
-      ALL_DONE=false
-      break
-    fi
-  done
+The coordinator drives the loop in §9.2 for every sub-task **in parallel**. Sub-task loops don't block each other — `wait_for_worker` is per-task. The coordinator only collects results when **all** sub-tasks reach `verdict=PASS|FAIL`.
 
-  if $ALL_DONE; then
-    break
-  fi
-  sleep 10
+```bash
+# Fan out: launch the per-sub-task loop concurrently
+declare -A SUBTASK_VERDICTS
+while :; do
+  ALL_DONE=true
+  for SUB in "${TOPO_IDS[@]}"; do
+    local v="${SUBTASK_VERDICTS[$SUB]:-}"
+    if [ -z "$v" ]; then
+      # not done yet — check the latest verdict in state
+      v=$(jq -r --arg id "$SUB" '.tasks.subtasks[] | select(.id == $id) | .verdict' "$STATE_FILE")
+      SUBTASK_VERDICTS["$SUB"]="$v"
+    fi
+    if [ -z "$v" ]; then ALL_DONE=false; fi
+  done
+  $ALL_DONE && break
+  sleep 5
 done
 
 echo "All subtasks have completed."
@@ -909,14 +1075,18 @@ echo "All subtasks have completed."
 
 ### 9.4 Timeout Handling
 
-If any subtask exceeds its `timeout_ms`:
+If any **terminal** exceeds its `timeout_ms`, that terminal is closed and the sub-task fails that round (or escalates to Phase 6 if it's the keep_terminal).
 
 ```bash
-# Mark timed-out task as failed
+# Per-terminal timeout enforced inside dispatch_and_wait via:
+#   - signal SIGTERM after timeout_ms
+#   - then `orca terminal close --handle "$handle"`
+#   - record verdict=FAIL reason="Terminal timeout after ${ms}ms"
+
 orca orchestration task-update \
-  --id "$TIMED_OUT_TASK" \
+  --id "$TIMED_OUT_TASK_ID" \
   --status "failed" \
-  --result '{"verdict":"FAIL","reason":"Timeout exceeded","retries":-1}' \
+  --result '{"verdict":"FAIL","reason":"Terminal timeout","round":-1}' \
   --json
 ```
 
@@ -927,11 +1097,24 @@ orca orchestration task-update \
   "phase": "EXECUTING",
   "status": "complete",
   "subtask_results": [
-    {"id": "sub-1", "verdict": "PASS", "artifact": "research-notes.md", "retries": 1},
-    {"id": "sub-2", "verdict": "PASS", "artifact": "draft.md", "retries": 0},
-    {"id": "sub-3", "verdict": "FAIL", "reason": "Image generation API unavailable", "retries": 3}
+    {
+      "id": "sub-1",
+      "verdict": "PASS",
+      "artifact": "research-notes.md",
+      "review_rounds": 1,
+      "worktree_path": "../add-user-prefs-prefs-api",
+      "branch_name": "feature/add-user-prefs/prefs-api-20260727-1030",
+      "terminals": [
+        {"handle":"term_yyy","role":"execution","round":0,"agent_type":"claude","verdict":"PASS"},
+        {"handle":"term_rrr","role":"review",   "round":0,"agent_type":"pi",   "verdict":"FAIL"},
+        {"handle":"term_zzz","role":"execution","round":1,"agent_type":"claude","verdict":"PASS"},
+        {"handle":"term_sss","role":"review",   "round":1,"agent_type":"pi",   "verdict":"PASS"}
+      ],
+      "keep_terminal": "term_zzz"
+    },
+    {"id":"sub-2","verdict":"FAIL","reason":"Cross-review never passed after 3 rounds","review_rounds":3}
   ],
-  "timestamp": "2026-07-26T11:00:00Z"
+  "timestamp": "2026-07-27T11:00:00Z"
 }
 ```
 
