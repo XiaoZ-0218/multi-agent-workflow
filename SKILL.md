@@ -1,6 +1,6 @@
 ---
 name: multi-agent-workflow
-version: 2.0.1
+version: 2.1.0
 author: orca-workflow-team
 tags: [orchestration, multi-agent, workflow, supervisor, cicd]
 description: >
@@ -18,7 +18,7 @@ applyTo: "**/*"
 
 # Multi-Agent Orchestration Workflow — Production Skill
 
-> **Version**: 2.0.1 &ensp;|&ensp; **Runtime**: Orca IDE ≥ 1.x &ensp;|&ensp; **License**: MIT
+> **Version**: 2.1.0 &ensp;|&ensp; **Runtime**: Orca IDE ≥ 1.x &ensp;|&ensp; **License**: MIT
 >
 > Reference flowchart: [`docs/workflow.md`](./docs/workflow.md)
 
