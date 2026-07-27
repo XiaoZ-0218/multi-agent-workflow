@@ -1,24 +1,28 @@
 ---
 name: multi-agent-workflow
-version: 2.1.0
+version: 2.2.0
 author: orca-workflow-team
 tags: [orchestration, multi-agent, workflow, supervisor, cicd]
 description: >
   Production-grade multi-agent orchestration workflow for Orca IDE.
   Implements a full lifecycle pipeline: requirements gathering → plan generation
-  & review → user confirmation → task decomposition → parallel execution with
-  sub-review → result aggregation & decision → PR-based merge → archival.
-  Built on `orca orchestration` primitives (task-create, dispatch, gate-create,
-  ask, run) with hard cycle caps, human-in-the-loop fallbacks, degraded-delivery
-  exits, and full observability. Invoke this skill whenever the user needs to
-  decompose a complex task across multiple agents, coordinate parallel workstreams,
-  or execute a structured development pipeline from spec to merge.
+  & review → user confirmation → task decomposition → wave-dispatched parallel
+  execution with cross-review → result aggregation & decision → integration
+  review & single-PR merge → archival. One user request = one feature = ONE
+  worktree + ONE branch (`feature/<slug>`, based on `origin/main`) + ONE PR;
+  subtasks share the feature worktree and are kept apart by declared `owns`
+  path ownership, not by filesystem isolation. Built on `orca orchestration`
+  primitives (task-create, dispatch, check, ask) with hard cycle caps,
+  human-in-the-loop fallbacks, degraded-delivery exits, and full observability.
+  Invoke this skill whenever the user needs to decompose a complex task across
+  multiple agents, coordinate parallel workstreams, or execute a structured
+  development pipeline from spec to merge.
 applyTo: "**/*"
 ---
 
 # Multi-Agent Orchestration Workflow — Production Skill
 
-> **Version**: 2.1.0 &ensp;|&ensp; **Runtime**: Orca IDE ≥ 1.x &ensp;|&ensp; **License**: MIT
+> **Version**: 2.2.0 &ensp;|&ensp; **Runtime**: Orca IDE ≥ 1.x &ensp;|&ensp; **License**: MIT
 >
 > Reference flowchart: [`docs/workflow.md`](./docs/workflow.md)
 
@@ -49,149 +53,155 @@ applyTo: "**/*"
 
 ## 1. Architecture Overview
 
+The coordinator **stays on the main branch for the entire run**. It never runs
+`git checkout`; its only git operations in its own checkout are `git fetch
+origin` (and optionally `git pull --ff-only`). All implementation work happens
+in **one** feature worktree created in Phase 4.
+
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                     COORDINATOR (This Agent)                      │
-│  ┌─────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  │
-│  │ Phase 1 │→│ Phase 2  │→│ Phase 3  │→│    Phase 4        │  │
-│  │ Gather  │  │ Plan+Rev │  │ Confirm  │  │ Decompose+Dispatch│  │
-│  └─────────┘  └──────────┘  └──────────┘  └───────┬──────────┘  │
-│                                                    │             │
-│              one worktree + branch + first terminal per sub-task │
-│                                                    │             │
-│                              ┌─────────────────────┼──────┐      │
-│                              │  PER-SUBTASK WORKTREES   │      │
-│                              │   (stacked branches)     │      │
-│                              │                        │      │
-│                              │  ┌──────┐  ┌──────┐  ┌──────┐│    │
-│                              │  │Sub-1 │  │Sub-2 │  │Sub-3 ││    │
-│                              │  │wt+br │  │wt+br │  │wt+br ││    │
-│                              │  │ ↓    │  │ ↓    │  │ ↓    ││    │
-│                              │  │ term0│→ │ term0│  │ term0││    │
-│                              │  │ exec │  │ exec │  │ exec ││    │
-│                              │  │ ↓    │  │ ↓    │  │ ↓    ││    │
-│                              │  │term1 │  │term1 │  │term1 ││    │
-│                              │  │review│  │review│  │review││    │
-│                              │  │ ...  │  │ ...  │  │ ...  ││    │
-│                              │  └──┬───┘  └──┬───┘  └──┬───┘│    │
-│                              │     │ stacked│        │     │    │
-│                              │     │  ◄─────┘        │     │    │
-│                              └─────┼────────────────┼─────┘    │
-│  ┌──────────┐  ┌──────────┐       │        │        │            │
-│  │ Phase 6  │←─┤ Collect  │←──────┴────────┴────────┘            │
-│  │ Decide   │  │ All Done │   (one PR + worktree cleanup per     │
-│  └────┬─────┘  └──────────┘    sub-task, in dependency order)    │
-│       │                                                            │
-│  ┌────┴─────┐  ┌──────────┐  ┌──────────┐                        │
-│  │ Phase 7  │→│ Phase 8  │→│  Notify  │                        │
-│  │PR/Merge  │  │ Cleanup  │  │  User    │                        │
-│  │per-sub   │  │per-wt    │  │          │                        │
-│  └─────────┘  └──────────┘  └──────────┘                        │
-└──────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│               COORDINATOR (This Agent — stays on main)                 │
+│                                                                        │
+│  ┌─────────┐  ┌──────────┐  ┌──────────┐  ┌────────────────────────┐  │
+│  │ Phase 1 │→│ Phase 2  │→│ Phase 3  │→│        Phase 4         │  │
+│  │ Gather  │  │ Plan+Rev │  │ Confirm  │  │ git fetch origin main │  │
+│  └─────────┘  └──────────┘  └──────────┘  │ create ONE worktree   │  │
+│                                            │ decompose → dispatch  │  │
+│                                            │ wave 0                │  │
+│                                            └───────────┬────────────┘  │
+│                                                        │               │
+│     ONE FEATURE WORKTREE   feature/<slug>   (base: origin/main)        │
+│     ┌──────────────────────────────────────────────────┼───────────┐   │
+│     │ Wave 0  (parallel, disjoint owns)                ▼           │   │
+│     │   sub-1: [exec r0]→[review r0]→[fix r1]→[review r1] → PASS   │   │
+│     │   sub-2: [exec r0]→[review r0]─────────────────────→ PASS    │   │
+│     │          each […] = FRESH terminal + NEW task                │   │
+│     │ Wave 1  (dispatched only after ALL parents PASS)             │   │
+│     │   sub-3: sees parents' committed code in the same worktree   │   │
+│     └──────────────────────────────────────────────────┬───────────┘   │
+│  ┌──────────┐  ┌───────────────────────────────────────┘           │   │
+│  │ Phase 6  │←│ collect every subtask verdict (PASS/FAIL)          │   │
+│  │ Decide   │  └───────────────────────────────────────────────────┘   │
+│  └────┬─────┘                                                          │
+│  ┌────┴─────────────────────────────────────────────────────────────┐  │
+│  │ Phase 7 (inside the feature worktree):                            │  │
+│  │   rebase origin/main → autofix ≤2 → run tests →                   │  │
+│  │   INTEGRATION REVIEW (fresh review terminal, ≤2 rounds) →         │  │
+│  │   gh pr create (ONE PR) → poll gh pr view every 60s               │  │
+│  └────┬──────────────────────────────────────────────────────────────┘  │
+│  ┌────┴─────┐   ┌────────────────┐   ┌───────────┐                      │
+│  │ Phase 8  │→ │ history.jsonl  │→ │  Notify   │  afterwards:          │
+│  │ Cleanup  │   │ + park manifest│   │  User     │  git fetch only —    │
+│  └──────────┘   └────────────────┘   └───────────┘  never checkout     │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
-### v2.1.0 — What's Different from v2.0.x
+### v2.2.0 — What's Different from v2.1.0
 
-| Aspect | v2.0.x (legacy) | v2.1.0 |
-|--------|------------------|--------|
-| Worktree | One shared `feature/<slug>-<ts>` for the whole workflow | **One per sub-task**: `feature/<wf>/<sub>-<ts>` |
-| Branch base | Always `main` | **Stacked**: deps-less → `main`; dependent → parent sub-task's branch |
-| PR | One bundle PR for all sub-tasks | **One per sub-task**; dependent PRs start as draft |
-| Review loop | Same worker terminal self-reviews up to MAX_SUB_RETRY | **Fresh terminal per round**: implement → review (new) → fix (new) → review (new) → … |
-| Cross-review | Self-review only | **Cross-agent**: implement with `claude`/`kimi`, review with `pi` (see `docs/agent-routing.md`) |
-| Parallelism safety | Sub-agents can clobber each other in shared worktree | Each sub-task has its own worktree; no cross-task contention |
+| Aspect | v2.1.0 | v2.2.0 |
+|--------|--------|--------|
+| Worktree | One per sub-task | **One per feature**: `feature/<slug>` based on `origin/main`; subtasks share it |
+| Branches | Stacked — dependents branch off parent tips | **One feature branch**; dependencies mean serial waves, not stacked branches |
+| PRs | One per sub-task; dependents start as draft | **One PR** for the whole feature, created at the end |
+| Stacked-PR rebase hook (v2.1.0 §11.8) | Present | **Removed** — no stacked PRs exist to rebase |
+| Parallelism safety | Filesystem isolation (one `git worktree` per sub-task) | **`owns` path globs** per subtask + disjointness validation at plan review; coordinator verifies `git status`/`git diff` after every round |
+| Dispatch | All sub-tasks created up front in topo order | **Wave dispatch**: a subtask runs only after ALL its parents have `verdict=PASS`, seeing their committed code in the shared worktree |
+| Review scope | Latest files in the sub-task's worktree | **`git diff <base_sha>..HEAD`** limited to the subtask's `owns`; execution/fix agents commit in small commits |
+| Pre-PR quality gate | — | **NEW: integration review** — a fresh review-agent terminal reviews the whole feature (`plan + verdicts + tests + git diff origin/main...HEAD`) before `gh pr create`, ≤ 2 rounds |
+| Branch/path templates | `ORCA_WORKFLOW_BRANCH_STRATEGY`, `ORCA_WORKFLOW_BRANCH_TEMPLATE`, `ORCA_WORKFLOW_WORKTREE_PATH_TEMPLATE` | **Removed** — the branch is always `feature/<slug>`; the worktree path comes from `orca worktree create`'s JSON result |
+| Config vars | `ORCA_WORKFLOW_MAX_TERMINALS_PER_SUBTASK`, `ORCA_WORKFLOW_MIN_WORKERS` | **Removed**; **added** `ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW=2` |
+| Coordinator git | `git checkout main` during cleanup | **Never checks out** — `git fetch origin` only |
+| Kept | — | Fresh terminal per round, cross-agent review (reviewer ≠ implementer), hard caps on every loop, collect-all-then-decide, park/degrade exits |
 
 ### Design Principles
 
 | Principle | Implementation |
 |-----------|---------------|
-| **Per-Subtask Isolation** | Each sub-task owns a dedicated worktree + branch + set of terminals; sub-tasks never share filesystem state |
-| **Stacked Branches for Dependencies** | Dependent sub-tasks branch off parent tips (not main); preserves parallelism; auto-rebases onto `main` when the parent PR merges |
-| **Per-Round Fresh Agent** | Implementation, cross-review, and fix are each a separate `orca terminal create` invocation in the same worktree — no Agent context reuse, no carry-over bias |
-| **Fail-Safe by Default** | Every loop has a hard cap; no infinite retries |
-| **Human-in-the-Loop at High-Value Gates** | Escalation only at plan-review, per-subtask merge-conflict, and parked-subtask boundaries |
-| **Collect-All-Then-Decide** | Sub-task failures do NOT interrupt sibling sub-tasks; all results aggregate before the global retry decision |
-| **Per-Subtask PR + No Direct Merge** | No direct `git merge`; each sub-task integrates through its own PR; dependent PRs auto-rebase onto `main` when the parent merges |
-| **Immutable Audit Trail** | Every decision gate, escalation, terminal spawn, and PR transition is logged to `.orca/workflow-state.json` (with `subtask_id` scope since v2.1.0) |
-| **Degraded Delivery over Total Failure** | When retries are exhausted, completed sub-tasks merge independently; failed sub-tasks are parked with per-subtask recovery manifests |
+| **One Feature = One Worktree, One Branch, One PR** | Each user request produces exactly one `feature/<slug>` worktree + branch based on `origin/main`, and exactly one PR. No per-subtask worktrees, no stacked branches, no draft/per-subtask PRs. |
+| **Isolation by Ownership Convention (honest model)** | Subtasks share the feature worktree. Parallel safety comes from each subtask declaring `owns` (file/dir globs); same-wave subtasks must have **disjoint** `owns`, validated during plan review. The coordinator enforces the convention after each round via `git status`/`git diff` checks and reverts any out-of-`owns` writes. This is a coordinator-enforced convention — **not** a filesystem sandbox. |
+| **Wave Dispatch** | Subtasks whose deps are all PASS run in parallel (one wave); a dependent subtask is dispatched only after ALL its parents PASS, and sees their committed code naturally in the shared worktree. |
+| **Per-Round Fresh Agent** | Every execution, fix, review, fallback, autofix, pr-fix, and integration-review round is a separate `orca terminal create` + a **new** task (chained with `--parent`). A task is never re-dispatched — Orca circuit-breaks a task after 3 consecutive failures. |
+| **Cross-Agent Review** | The review agent is never the implementation agent (see `docs/agent-routing.md`). Review is read-only and scoped to `<base_sha>..HEAD` within the subtask's `owns`. |
+| **Fail-Safe by Default** | Every loop has a hard cap; no infinite retries. |
+| **Human-in-the-Loop at High-Value Gates** | User decisions at plan escalation, confirmation, subtask-failure handling, autofix exhaustion, and integration-review exhaustion — always via the coordinator's **native** user-interaction channel, never `orca orchestration ask --to coordinator`. |
+| **Collect-All-Then-Decide** | A subtask failure does NOT interrupt its siblings; all verdicts aggregate before the global retry/degrade/abort decision. |
+| **Single PR + No Direct Merge** | The workflow never runs `git merge`; the feature integrates through one PR; only a human merges. |
+| **Immutable Audit Trail** | Every decision, terminal spawn, and state transition is written to `.orca/workflow-state.json` via jq atomic writes (tmp file + `mv`), never `>>`. |
+| **Degraded Delivery over Total Failure** | When retries are exhausted, the coordinator reverts each failed subtask's commit range (clean because `owns` are disjoint) and ships the rest with a ⚠️ degraded banner. |
 
 ---
 
 ## 2. State Machine
 
-v2.1.0 introduces a **per-sub-task subgraph** under `DISPATCHING`/`EXECUTING`/`MERGING`/`CLEANING`. The workflow-level state advances only when **all** sub-tasks reach the corresponding state; an individual sub-task can be `PARKED` without terminating the workflow.
+v2.2.0 adds `INIT` to the `current_phase`/`current_state` enums, makes
+`EXECUTING` **wave-based** (waves are topological levels of the subtask DAG),
+gives `MERGING` explicit sub-steps (rebase → autofix → tests → integration
+review → PR monitor), and makes `PARKED` a **feature-level** state (the whole
+feature is parked, never an individual subtask).
 
 ```
                     ┌─────────┐
                     │  INIT   │
                     └────┬────┘
-                         │
-              ┌──────────┴──────────┐
-              ▼                     ▼
-        ┌──────────┐         ┌──────────────┐
-        │GATHERING │         │ TERMINATED   │
-        │(Phase 1) │         │ (any phase)  │
-        └────┬─────┘         └──────────────┘
-             │
-        ┌────┴─────┐
-        │ PLANNING  │◄──── Feedback / Retry ────┐
-        │(Phase 2)  │──► ESCALATED ──► (Term?)  │
-        └────┬─────┘                            │
-             │                                  │
-        ┌────┴─────┐                            │
-        │CONFIRMING│──► REJECTED ───────────────┘
-        │(Phase 3) │──► FORCE_TERMINATE
-        └────┬─────┘
-             │
-        ┌────┴────────┐
-        │DISPATCHING  │◄─── Retry Failed Items ───┐
-        │(Phase 4)    │   (per-subtask worktrees) │
-        └────┬────────┘                            │
-             │ for each sub-task (topo order):      │
-             │   create wt+br, spawn first terminal │
-             ▼                                     │
-        ┌──────────────────────────────────┐       │
-        │ EXECUTING  (per-subtask, parallel)│       │
-        │ ┌──────────────────────────────┐ │       │
-        │ │ round 0: implement (new term)│ │       │
-        │ │ round 1: review   (new term) │ │       │
-        │ │ round 2: fix      (new term) │ │       │
-        │ │ round 3: review   (new term) │ │       │
-        │ │ ... up to MAX_SUB_RETRY      │ │       │
-        │ │ pass → exit to MERGING_sub-N │ │       │
-        │ │ fail → SUB_FAILURES ─────────┼─┼──► Phase 6
-        │ └──────────────────────────────┘ │       │
-        │ ... one block per sub-task ...   │       │
-        └──────────────┬───────────────────┘       │
-                       │ all sub-tasks done        │
-        ┌──────────────▼───────────┐              │
-        │ DECIDING  (Phase 6)      │              │
-        │ RETRY ───────────────────┼──────────────┘
-        │ DEGRADE / ESCALATE_SUB   │
-        └──────────────┬───────────┘
-                       │
-        ┌──────────────▼───────────────────────┐
-        │ MERGING  (Phase 7, per-subtask)      │
-        │ for each sub-task (topo order):      │
-        │   rebase onto base_branch            │
-        │   push + gh pr create --base parent  │
-        │   wait human gate                    │
-        │   on parent merge → rebase + flip    │
-        │ PARKED (per-subtask, recoverable)    │
-        └──────────────┬───────────────────────┘
-                       │ all merged / parked
-        ┌──────────────▼───────────────────────┐
-        │ CLEANING  (Phase 8, per-subtask,     │
-        │ reverse-topo order)                  │
-        │ delete branch, remove worktree,      │
-        │ close keep_terminal, write park md   │
-        └──────────────┬───────────────────────┘
-                       │
-                ┌──────┴──────┐
-                ▼             ▼
-          ┌────────┐    ┌────────────┐
-          │  DONE  │    │TERMINATED  │
-          └────────┘    └────────────┘
+                         ▼
+                  ┌───────────┐          ┌──────────────┐
+                  │ GATHERING │          │ TERMINATED   │
+                  │ (Phase 1) │          │ (any phase)  │
+                  └─────┬─────┘          └──────────────┘
+                        ▼
+                  ┌───────────┐  review FAIL ≤3 rounds / escalate ≤2
+                  │ PLANNING  │◄──────────────────────────┐
+                  │ (Phase 2) │                           │
+                  └─────┬─────┘                           │
+                        ▼ review PASS (worker_done)       │
+                  ┌───────────┐   Revise ─────────────────┘
+                  │CONFIRMING │   Abort (any round) ──► TERMINATED (immediate)
+                  │ (Phase 3) │
+                  └─────┬─────┘   Approve
+                        ▼
+                  ┌────────────┐
+                  │DISPATCHING │ fetch origin main → create ONE worktree
+                  │ (Phase 4)  │ → decompose DAG → dispatch wave 0
+                  └─────┬──────┘◄─────────────┐
+                        ▼                     │
+            ┌───────────────────────────┐     │
+            │ EXECUTING (wave-based)    │     │
+            │  wave k: subtasks whose   │     │
+            │  parents all PASS run in  │     │
+            │  parallel (disjoint owns) │     │
+            │  per subtask:             │     │
+            │   rounds 0..MAX_SUB_RETRY │     │
+            │   exec/fix → cross-review │     │
+            │   PASS → done             │     │
+            │   final-round FAIL →      │     │
+            │   verdict=FAIL (siblings  │     │
+            │   continue)               │     │
+            └─────────────┬─────────────┘     │
+                          ▼ all verdicts in   │
+                  ┌───────────┐               │
+                  │ DECIDING  │ all PASS ────────────────► MERGING
+                  │ (Phase 6) │ retry failed only ────────┘
+                  │           │   (global_retries_used < 2 checked BEFORE increment)
+                  │           │ degrade: revert failed commit ranges ──► MERGING
+                  │           │   └─ revert unclean ──► PARKED (whole feature)
+                  │           │ abort ──► TERMINATED
+                  └───────────┘
+                        ▼
+            ┌──────────────────────────────────┐
+            │ MERGING (Phase 7, feature-level) │
+            │  rebase origin/main              │
+            │  autofix ≤2 ── exhausted ──► human: manual resolve / PARKED
+            │  run tests (record results)      │
+            │  integration review ≤2 ── exhausted ──► human: release / PARKED
+            │  gh pr create → poll every 60s   │
+            │  MERGED ──► CLEANING             │
+            │  CLOSED ──► PARKED               │
+            └─────────────┬────────────────────┘
+                          ▼
+                  ┌───────────┐   MERGED ──► DONE
+                  │ CLEANING  │   PARKED ──► manifest written,
+                  │ (Phase 8) │              worktree+branch kept
+                  └───────────┘
 ```
 
 ### State Transition Table
@@ -199,29 +209,34 @@ v2.1.0 introduces a **per-sub-task subgraph** under `DISPATCHING`/`EXECUTING`/`M
 | From | Trigger | To | Guard |
 |------|---------|----|-------|
 | `INIT` | User request received | `GATHERING` | — |
-| `GATHERING` | Requirements clear | `PLANNING` | Q1 = yes |
-| `GATHERING` | Max clarification rounds | `TERMINATED` | > 5 rounds |
-| `PLANNING` | Review passed | `CONFIRMING` | Q2 = yes |
-| `PLANNING` | Review rounds exhausted + escalate ≤ 2 | `PLANNING` | Escalate → human input → retry |
+| `GATHERING` | Requirements clear | `PLANNING` | Gap checklist (§5.3) satisfied |
+| `GATHERING` | Clarification rounds exhausted | `TERMINATED` | > 5 rounds |
+| `PLANNING` | Plan review PASS | `CONFIRMING` | Verdict arrives via `worker_done` from the review task — never `gate-create` |
+| `PLANNING` | Review rounds exhausted + escalate ≤ 2 | `PLANNING` | Human direction resets the review counter |
 | `PLANNING` | Escalate count > 2 | `TERMINATED` | Terminate1 |
 | `CONFIRMING` | User approves | `DISPATCHING` | — |
-| `CONFIRMING` | User rejects (retries < 3) | `PLANNING` | Feedback collected |
-| `CONFIRMING` | User rejects (retries ≥ 3) | `TERMINATED` | Terminate2 or force-continue |
-| `DISPATCHING` | All sub-tasks have worktree+branch+first terminal | `EXECUTING` | — |
-| `DISPATCHING` | Sub-task creation failed (infra) | `TERMINATED` | Coordinator-side failure only; per-subtask failures don't terminate dispatch |
-| `EXECUTING.sub-N` | Cross-review PASS | `EXECUTING` (waiting on siblings) | All sub-tasks must reach this for workflow to advance |
-| `EXECUTING.sub-N` | Round budget exhausted | `EXECUTING.sub-N` (FAIL) | Per-sub-task failure; siblings continue |
-| `EXECUTING` | All sub-tasks have terminal verdict | `DECIDING` | — |
-| `DECIDING` | All sub-tasks passed | `MERGING` | AllOK = yes |
-| `DECIDING` | Retry (global retries < 2) | `DISPATCHING` | Only failed sub-tasks get new worktree+branch |
-| `DECIDING` | Degrade | `MERGING` | PartialOK flag set; passed sub-tasks continue to PR |
-| `DECIDING` | Escalate → human aborts | `TERMINATED` | Terminate3 |
-| `MERGING.sub-N` | Parent merged → rebase + flip base | `MERGING.sub-N` (rebase) | Only if this sub-task has deps |
-| `MERGING.sub-N` | PR merged | `MERGING` (waiting on siblings) | — |
-| `MERGING.sub-N` | Auto-fix exhausted + human parks | `MERGING.sub-N` (PARKED) | Per-sub-task parking; siblings continue |
-| `MERGING` | All sub-tasks merged or parked | `CLEANING` | — |
-| `CLEANING.sub-N` | Worktree + branch removed + keep_terminal closed | `CLEANING` (next sibling) | Reverse-topo order |
-| `CLEANING` | All sub-tasks cleaned | `DONE` | — |
+| `CONFIRMING` | User revises (rounds < 3) | `PLANNING` | Feedback collected |
+| `CONFIRMING` | User aborts | `TERMINATED` | **Immediate, at any round** (no off-by-one) |
+| `CONFIRMING` | Rounds ≥ 3 without approval | `PLANNING` or `TERMINATED` | Forced user decision |
+| `DISPATCHING` | Worktree created + wave 0 dispatched | `EXECUTING` | — |
+| `DISPATCHING` | Worktree creation failed (infra) | `TERMINATED` | Coordinator-side failure only |
+| `EXECUTING` (wave k) | All wave-k subtasks PASS | `EXECUTING` (wave k+1) | Next wave dispatched; skip subtasks whose parents FAILED |
+| `EXECUTING`.sub-N | Cross-review PASS | subtask done | `verdict=PASS` recorded |
+| `EXECUTING`.sub-N | Final round's review still FAIL | subtask `verdict=FAIL` | Siblings continue |
+| `EXECUTING` | All dispatched subtasks have a verdict | `DECIDING` | — |
+| `DECIDING` | All PASS | `MERGING` | — |
+| `DECIDING` | Retry failed subtasks only | `DISPATCHING` | `global_retries_used < MAX_GLOBAL_RETRY` checked **before** incrementing → at most 2 retries |
+| `DECIDING` | Degrade | `MERGING` | Coordinator reverts each failed subtask's commit range; `delivery_mode=degraded` |
+| `DECIDING` | Degrade revert unclean | `PARKED` | Whole feature parked |
+| `DECIDING` | Abort | `TERMINATED` | Terminate3 |
+| `MERGING` | Rebase clean + tests recorded + integration review PASS + PR created | `MERGING` (monitor) | Poll `gh pr view` every 60s |
+| `MERGING` | Autofix exhausted | human decision | Manual resolve or `PARKED` |
+| `MERGING` | Integration review exhausted | human decision | Release anyway or `PARKED` |
+| `MERGING` | PR MERGED | `CLEANING` | — |
+| `MERGING` | PR CLOSED | `PARKED` | Keep worktree + branch |
+| `CLEANING` | Merged path: branch deleted, worktree removed, terminals closed | `DONE` | — |
+| `CLEANING` | Parked path: manifest written, worktree kept | `PARKED` | Recoverable |
+| any | Fatal coordinator error / user abort | `TERMINATED` | State persisted first |
 
 ---
 
@@ -234,26 +249,34 @@ v2.1.0 introduces a **per-sub-task subgraph** under `DISPATCHING`/`EXECUTING`/`M
 orca status --json | jq -e '.ok and .result.app.running and .result.runtime.reachable' \
   || { echo "FATAL: Orca is not running or unreachable"; exit 1; }
 
-# 2. Verify at least one worker terminal is available.
-#    Default policy (matches scripts/check-prerequisites.sh):
-#    - ORCA_WORKFLOW_STRICT_PREREQ=true  → FATAL: workflow cannot run parallel
-#      subtasks without a worker. Production / CI should set this.
-#    - ORCA_WORKFLOW_STRICT_PREREQ=false → WARN: the coordinator falls back to
-#      acting as the sole worker. Default for local dev and smoke tests.
-WORKER_COUNT=$(orca terminal list --json | jq '[.result.terminals[] | select(.type == "worker")] | length')
-if [ "$WORKER_COUNT" -lt 1 ]; then
-  if [ "${ORCA_WORKFLOW_STRICT_PREREQ:-false}" = "true" ]; then
-    echo "FATAL: No worker terminals available. Create one with: orca terminal create --type worker"
-    exit 1
-  else
-    echo "WARN: No worker terminals available — solo mode (coordinator = sole worker)."
-  fi
+# 2. Verify the coordinator is inside an Orca-managed checkout (NEW in v2.2.0)
+#    The coordinator lives in the main checkout for the whole run; the feature
+#    worktree is created later by `orca worktree create`.
+orca worktree current --json | jq -e '.result.worktree.id' >/dev/null \
+  || { echo "FATAL: coordinator is not inside an Orca-managed checkout"; exit 1; }
+
+#    Warn if the coordinator's checkout is not on main — it must stay on main.
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [ "$CURRENT_BRANCH" != "main" ]; then
+  echo "WARN: current branch is '$CURRENT_BRANCH', expected 'main' — the coordinator never checks out; start from main."
 fi
 
-# 3. Verify worktree is clean (no uncommitted changes blocking branch creation)
+# 3. Verify required tools
+for tool in git gh jq; do
+  command -v "$tool" >/dev/null || { echo "FATAL: $tool not found"; exit 1; }
+done
+
+# 4. Verify the main checkout is clean (WARN only — feature work happens elsewhere)
 git diff --quiet && git diff --cached --quiet \
   || { echo "WARN: Working directory has uncommitted changes. Stash or commit before proceeding."; }
 ```
+
+> **Deleted in v2.2.0: the worker-terminal count check.** Terminal objects have
+> no `type`/`tags` fields and `orca terminal create` has no `--tags` flag, so a
+> pre-flight "is there a tagged worker?" probe was meaningless. The coordinator
+> spawns every worker terminal itself, fresh, at dispatch time.
+> `ORCA_WORKFLOW_STRICT_PREREQ` is retained for the remaining checks in
+> `scripts/check-prerequisites.sh`.
 
 ### 3.2 Required Tools
 
@@ -262,43 +285,49 @@ git diff --quiet && git diff --cached --quiet \
 | Orca IDE | ≥ 1.x | `orca status --json` | Orchestration runtime |
 | Git | ≥ 2.30 | `git --version` | Version control |
 | GitHub CLI | ≥ 2.0 | `gh --version` | PR creation & management |
-| jq | ≥ 1.6 | `jq --version` | JSON parsing in shell |
+| jq | ≥ 1.6 | `jq --version` | JSON parsing + atomic state writes |
 
 ### 3.3 Environment Variables
 
-> 完整列表及优先级参见 [`docs/agent-routing.md`](./docs/agent-routing.md#环境变量覆盖)。
+> Full list and precedence: [`docs/agent-routing.md`](./docs/agent-routing.md).
 
 ```bash
-# === 流程限制（覆盖 workflow.limits.*）===
+# === Limits (override workflow.limits.*) ===
 export ORCA_WORKFLOW_MAX_REVIEW_ROUNDS=${ORCA_WORKFLOW_MAX_REVIEW_ROUNDS:-3}
 export ORCA_WORKFLOW_MAX_ESCALATE=${ORCA_WORKFLOW_MAX_ESCALATE:-2}
 export ORCA_WORKFLOW_MAX_USER_CONFIRM=${ORCA_WORKFLOW_MAX_USER_CONFIRM:-3}
 export ORCA_WORKFLOW_MAX_SUB_RETRY=${ORCA_WORKFLOW_MAX_SUB_RETRY:-3}
 export ORCA_WORKFLOW_MAX_GLOBAL_RETRY=${ORCA_WORKFLOW_MAX_GLOBAL_RETRY:-2}
 export ORCA_WORKFLOW_MAX_AUTOFIX=${ORCA_WORKFLOW_MAX_AUTOFIX:-2}
+export ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW=${ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW:-2}   # NEW in v2.2.0
 
-# === 路径与日志 ===
+# === Paths & logging ===
 export ORCA_WORKFLOW_STATE_FILE="${ORCA_WORKFLOW_STATE_FILE:-.orca/workflow-state.json}"
 export ORCA_WORKFLOW_LOG_LEVEL="${ORCA_WORKFLOW_LOG_LEVEL:-INFO}"
 
-# === 行为开关 ===
-# true  → check-prerequisites.sh 缺失 worker 时返回 FAIL（生产 / CI 推荐）
-# false → 允许 solo / dry-run（coordinator 自身作为唯一 worker；本地与冒烟测试默认）
+# === Behaviour switches ===
+# true  → scripts/check-prerequisites.sh fails hard when a prerequisite is missing
+#         (recommended for production / CI)
+# false → WARN and continue (default for local dev and smoke tests)
 export ORCA_WORKFLOW_STRICT_PREREQ="${ORCA_WORKFLOW_STRICT_PREREQ:-false}"
+export ORCA_WORKFLOW_DRY_RUN="${ORCA_WORKFLOW_DRY_RUN:-false}"
 
-# === Agent 路由（覆盖 docs/agent-routing.md）===
+# === Agent routing (override docs/agent-routing.md — same names as v2.1.0) ===
 export ORCA_WORKFLOW_PLAN_AGENT="${ORCA_WORKFLOW_PLAN_AGENT:-Plan}"
 export ORCA_WORKFLOW_REVIEW_AGENT="${ORCA_WORKFLOW_REVIEW_AGENT:-pi}"
 export ORCA_WORKFLOW_EXECUTION_AGENT="${ORCA_WORKFLOW_EXECUTION_AGENT:-claude}"
 export ORCA_WORKFLOW_COMPLEX_EXECUTION_AGENT="${ORCA_WORKFLOW_COMPLEX_EXECUTION_AGENT:-kimi}"
 export ORCA_WORKFLOW_IMAGE_AGENT="${ORCA_WORKFLOW_IMAGE_AGENT:-grok}"
 export ORCA_WORKFLOW_FALLBACK_AGENT="${ORCA_WORKFLOW_FALLBACK_AGENT:-pi}"
-# 通用任务失败后的兜底链（逗号分隔，优先级从高到低）
+# Fallback chain after a generic task failure (comma-separated, highest priority first)
 export ORCA_WORKFLOW_FALLBACK_CHAIN="${ORCA_WORKFLOW_FALLBACK_CHAIN:-grok,pi}"
-
-# === 模拟 ===
-export ORCA_WORKFLOW_DRY_RUN="${ORCA_WORKFLOW_DRY_RUN:-false}"
 ```
+
+> **Removed in v2.2.0** (no longer read — the per-feature worktree model needs
+> no branch/path templates, and terminal counts are not pre-flight checked):
+> `ORCA_WORKFLOW_BRANCH_STRATEGY`, `ORCA_WORKFLOW_BRANCH_TEMPLATE`,
+> `ORCA_WORKFLOW_WORKTREE_PATH_TEMPLATE`,
+> `ORCA_WORKFLOW_MAX_TERMINALS_PER_SUBTASK`, `ORCA_WORKFLOW_MIN_WORKERS`.
 
 ---
 
@@ -306,15 +335,17 @@ export ORCA_WORKFLOW_DRY_RUN="${ORCA_WORKFLOW_DRY_RUN:-false}"
 
 ### 4.1 Tunable Parameters
 
-> 📖 **Agent 选型（routing）详见 [`docs/agent-routing.md`](./docs/agent-routing.md)** —— 单一起源。
-> 修改偏好只改 `agent-routing.md` 与对应的 `ORCA_WORKFLOW_*` 环境变量；不要把 agent 名称硬编码进任务 spec。
+> 📖 **Agent routing is defined in [`docs/agent-routing.md`](./docs/agent-routing.md)** — the single source of truth.
+> To change a preference, edit `agent-routing.md` plus the matching `ORCA_WORKFLOW_*`
+> environment variable; never hardcode agent names into task specs.
 >
-> 下方配置中 `routing.*_agent_type` 仅作冷启动默认值；运行时实际生效的是 `agent-routing.md` + env override。
+> The `routing.*_agent_type` values below are cold-start defaults only; at runtime the
+> effective values come from `agent-routing.md` + env overrides.
 
 ```json
 {
   "workflow": {
-    "version": "2.0.1",
+    "version": "2.2.0",
     "limits": {
       "max_review_rounds": 3,
       "max_escalate_count": 2,
@@ -322,6 +353,7 @@ export ORCA_WORKFLOW_DRY_RUN="${ORCA_WORKFLOW_DRY_RUN:-false}"
       "max_subtask_retries": 3,
       "max_global_retries": 2,
       "max_autofix_attempts": 2,
+      "max_integration_review_rounds": 2,
       "max_clarification_rounds": 5
     },
     "timeouts_ms": {
@@ -330,7 +362,7 @@ export ORCA_WORKFLOW_DRY_RUN="${ORCA_WORKFLOW_DRY_RUN:-false}"
       "pr_review_poll_interval": 60000
     },
     "routing": {
-      "_note": "见 docs/agent-routing.md（单一起源）。",
+      "_note": "Single source of truth: docs/agent-routing.md. These are cold-start defaults only.",
       "plan_agent_type": "Plan",
       "review_agent_type": "pi",
       "execution_agent_type": "claude",
@@ -340,7 +372,9 @@ export ORCA_WORKFLOW_DRY_RUN="${ORCA_WORKFLOW_DRY_RUN:-false}"
       "default_model": "sonnet"
     },
     "terminals": {
-      "_note": "Worker 终端需预先创建并打标签。模型选择在 terminal create 时通过 --command 指定，dispatch 层不支持传 model。"
+      "spawn_per_role": true,
+      "close_intermediate_terminals": true,
+      "_note": "A fresh terminal is spawned for every round of every role, all inside the ONE shared feature worktree. `orca terminal create` has no --tags flag and terminal objects carry no type/tags fields: agent identity is carried by the --title prefix convention '[<role>:<agent>] …' and by the coordinator's state record (handle → role/round/agent_type)."
     },
     "merge": {
       "mode": "pr_only",
@@ -379,10 +413,15 @@ The workflow looks for configuration in this order (first wins):
 
 ### 5.2 Process
 
+The coordinator talks to the user through its **own native user-interaction
+channel** (the chat surface it was invoked on). It must **never** use
+`orca orchestration ask --to coordinator` — that channel is reserved for
+**worker → coordinator** messages (§18.1).
+
 ```
 clarification_round = 0
 
-while clarification_round < MAX_CLARIFICATION_ROUNDS:
+while clarification_round < MAX_CLARIFICATION_ROUNDS:   # default 5
     gaps = analyze_request(user_input)
 
     if gaps is empty:
@@ -391,10 +430,9 @@ while clarification_round < MAX_CLARIFICATION_ROUNDS:
         break
 
     clarification_round += 1
-    response = await orca orchestration ask \
-      --to coordinator \
-      --question "Before I proceed, I need to clarify:\n{gaps_formatted}\n\nPlease provide details."
-
+    response = await ask_user_via_native_channel(
+        "Before I proceed, I need to clarify:\n{gaps_formatted}\n\nPlease provide details."
+    )
     user_input = merge(user_input, response)
 
 if clarification_round >= MAX_CLARIFICATION_ROUNDS:
@@ -422,7 +460,7 @@ If ≥ 2 items are missing, pause and clarify.
   "status": "complete",
   "clarified_requirement": "Full requirement text after clarification",
   "clarification_rounds": 2,
-  "timestamp": "2026-07-26T10:00:00Z"
+  "timestamp": "2026-07-27T10:00:00Z"
 }
 ```
 
@@ -430,15 +468,17 @@ If ≥ 2 items are missing, pause and clarify.
 
 | Error | Severity | Action |
 |-------|----------|--------|
-| User unresponsive (> 5 min with no reply to `ask`) | WARN | Retry once with a reminder; if still no response, persist state and exit with `TIMEOUT` |
-| User request contradicts itself | WARN | Flag contradiction explicitly in the `ask`; do not guess |
-| `orca orchestration ask` command fails | FATAL | Log error, check Orca connectivity, exit |
+| User unresponsive (> 5 min with no reply) | WARN | Retry once with a reminder; if still no response, persist state and exit with `TIMEOUT` |
+| User request contradicts itself | WARN | Flag the contradiction explicitly; do not guess |
+| Native channel unavailable | FATAL | Log error, persist state, exit |
 
 ---
 
 ## 6. Phase 2 — Plan Generation & Review
 
-**Goal**: Generate a technical plan document and have it pass review (max review rounds, with human escalation fallback).
+**Goal**: Generate a technical plan and have it pass review by a **separate
+review agent** (≤ `MAX_REVIEW_ROUNDS` rounds, with ≤ `MAX_ESCALATE_COUNT`
+human escalations as fallback).
 
 ### 6.1 Entry Condition
 
@@ -447,111 +487,97 @@ If ≥ 2 items are missing, pause and clarify.
 
 ### 6.2 Process
 
+Key rules:
+
+- The plan is produced by the **plan agent** as a dispatched task on a fresh terminal.
+- The review is a **separate review task** dispatched to the **review agent**
+  (default `pi`) on its own fresh terminal. The verdict arrives via
+  **`worker_done`** — do **NOT** use `gate-create` for agent reviews.
+  `gate-create` is reserved for coordinator-managed DAG decisions (§18.1).
+- The plan artifact is passed **as text** (task result / `worker_done` body).
+  It is **never written as a file into the main checkout** — the coordinator's
+  checkout stays clean.
+- Plan/plan-review terminals are spawned in the coordinator's current (main)
+  checkout: the feature worktree does not exist until Phase 4. Both agents are
+  text-only here and must not modify files.
+
 ```python
 review_round = 0
 escalate_count = 0
+feedback = None
 
-# Step 1: Create the plan-generation task
+# Step 1: create + dispatch the plan-generation task on a fresh terminal
 plan_task_id = task_create(
     title=f"Plan: {requirement_summary}",
     display_name="📝 Plan Agent",
-    spec=f"""Based on the following requirement, produce a detailed technical plan document.
+    spec=build_plan_spec(clarified_requirement),   # format: summary, approach,
+)                                                  # subtask DAG w/ deps+owns, risks, acceptance
+plan_handle = terminal_create(title="[plan:Plan] plan r0", command=agent_command_for(PLAN_AGENT))
+dispatch(task=plan_task_id, to=plan_handle, inject=True)
 
-Requirement:
-{clarified_requirement}
+while review_round < MAX_REVIEW_ROUNDS:              # default 3
+    plan_text = await wait_worker_done(plan_task_id) # plan artifact = TEXT of the result
 
-Output format:
-1. Executive Summary (≤ 5 lines)
-2. Technical Approach (architecture, stack, key decisions)
-3. Implementation Steps (ordered, with estimated effort)
-4. Risk Assessment (top 3 risks with mitigations)
-5. Acceptance Criteria (measurable, testable)
-
-Write in markdown. Be concrete — no hand-waving."""
-)
-
-# Step 2: Dispatch to worker
-dispatch(task_id=plan_task_id, to=select_worker("plan"))
-
-# Step 3: Wait for worker_done, then enter review loop
-while review_round < MAX_REVIEW_ROUNDS:
-    # Wait for plan artifact
-    plan_doc = await wait_for_artifact(plan_task_id)
-
-    # Create review gate
-    gate_result = gate_create_and_await(
-        task=plan_task_id,
-        question=f"""Review the technical plan against these criteria:
-1. Completeness: Does it cover all aspects of the requirement?
-2. Feasibility: Is each step technically achievable?
-3. Clarity: Can an execution agent follow it without ambiguity?
-4. Risk: Are the top 3 risks identified with credible mitigations?
-
-Respond: PASS (all criteria met) or FAIL with specific issues listed.""",
-        options=["PASS", "FAIL"]
+    # Step 2: SEPARATE review task → review agent → verdict via worker_done
+    review_task_id = task_create(
+        title=f"Plan review r{review_round}",
+        spec=build_plan_review_spec(plan_text),      # includes checklist §6.3
+        parent=plan_task_id,
     )
+    review_handle = terminal_create(title=f"[review:{REVIEW_AGENT}] plan r{review_round}",
+                                    command=agent_command_for(REVIEW_AGENT))
+    dispatch(task=review_task_id, to=review_handle, inject=True)
+    verdict = await wait_worker_done(review_task_id) # {"verdict":"PASS"|"FAIL","feedback":...}
+    terminal_close(review_handle)
 
-    if gate_result == "PASS":
+    if verdict == "PASS":
         emit PLAN_APPROVED event
         transition to CONFIRMING
         break
 
+    feedback = verdict.feedback
     review_round += 1
     if review_round < MAX_REVIEW_ROUNDS:
-        # Re-dispatch with feedback
-        task_update(plan_task_id, status="pending")
-        dispatch(
-            task=plan_task_id,
-            to=select_worker("plan"),
-            inject=True,
-            preamble=f"Previous plan was rejected. Address these issues:\n{gate_result.feedback}"
-        )
+        # NEW task (never re-dispatch the old one) + FRESH terminal
+        plan_task_id = task_create(title=f"Plan revision r{review_round}",
+                                   spec=build_plan_spec(clarified_requirement, feedback),
+                                   parent=plan_task_id)
+        plan_handle = terminal_create(title=f"[plan:{PLAN_AGENT}] plan r{review_round}",
+                                      command=agent_command_for(PLAN_AGENT))
+        dispatch(task=plan_task_id, to=plan_handle, inject=True)
     else:
-        # Escalate to human
+        # Escalate to the human via the NATIVE channel
         escalate_count += 1
-        if escalate_count <= MAX_ESCALATE_COUNT:
-            human_response = await ask_coordinator(
-                f"⚠️ Plan review failed after {MAX_REVIEW_ROUNDS} rounds (escalation {escalate_count}/{MAX_ESCALATE_COUNT}).\n\n"
-                f"Disagreement points:\n{gate_result.feedback}\n\n"
-                f"Please provide direction or choose to terminate.",
-                options=["Provide direction (free-text)", "Terminate — plan cannot converge"]
-            )
-            if human_response == "Terminate":
-                transition to TERMINATED (Terminate1)
-                break
-            # Reset review round, incorporate human direction
-            review_round = 0
-            task_update(plan_task_id, status="pending")
-            dispatch(plan_task_id, preamble=f"Human direction: {human_response}\nGenerate revised plan.")
+        if escalate_count <= MAX_ESCALATE_COUNT:     # default 2
+            human = await ask_user_via_native_channel(
+                f"⚠️ Plan review failed after {MAX_REVIEW_ROUNDS} rounds "
+                f"(escalation {escalate_count}/{MAX_ESCALATE_COUNT}).\n"
+                f"Disagreement points:\n{feedback}\n"
+                f"Provide direction, or terminate.")
+            if human == "terminate":
+                transition to TERMINATED (Terminate1); break
+            review_round = 0                          # reset; fold human direction into spec
+            plan_task_id = task_create(..., parent=plan_task_id)  # NEW task + fresh terminal
+            ...
         else:
-            transition to TERMINATED (Terminate1)
-            break
+            transition to TERMINATED (Terminate1); break
 ```
 
-### 6.3 Shell Implementation
+### 6.3 Plan Review Checklist
 
-```bash
-# Create plan task
-PLAN_TASK=$(orca orchestration task-create \
-  --task-title "Plan: ${REQUIREMENT_SUMMARY}" \
-  --display-name "📝 Plan Agent" \
-  --spec "..." \
-  --json | jq -r '.result.task.id')
+The review agent's spec must include this checklist; the plan passes only if
+all items hold:
 
-# Select plan worker
-PLAN_WORKER=$(orca terminal list --json | jq -r '.result.terminals[] | select(.tags[]? == "plan") | .handle' | head -1)
-[ -z "$PLAN_WORKER" ] && PLAN_WORKER=$(orca terminal list --json | jq -r '.result.terminals[0].handle')
-
-# Dispatch
-orca orchestration dispatch --task "$PLAN_TASK" --to "$PLAN_WORKER" --inject --json
-
-# Create review gate — routed per routing.review_agent_type
-orca orchestration gate-create \
-  --task "$PLAN_TASK" \
-  --question "Review the technical plan. PASS or FAIL with reasons?" \
-  --options '["PASS","FAIL"]' \
-  --json
-```
+1. **Completeness** — the plan covers every aspect of the clarified requirement.
+2. **Feasibility** — each step is technically achievable by an execution agent.
+3. **Clarity** — each subtask spec is unambiguous and self-contained.
+4. **Risk** — the top 3 risks have credible mitigations.
+5. **Ownership declared (NEW in v2.2.0)** — every subtask declares `owns`: a
+   non-empty list of file/dir globs it is allowed to write.
+6. **Ownership disjoint (NEW in v2.2.0)** — subtasks in the same wave (i.e.
+   that can run in parallel) have **disjoint** `owns` globs. Overlapping globs
+   are a review FAIL with the conflicting subtask ids listed.
+7. **Valid DAG** — `deps` reference existing subtasks and contain no cycles.
 
 ### 6.4 Output
 
@@ -562,9 +588,9 @@ orca orchestration gate-create \
   "plan_task_id": "task_xxx",
   "review_rounds": 2,
   "escalate_count": 0,
-  "plan_artifact": "path/to/plan.md",
+  "plan_artifact": "<full plan text, stored in state — never a file in the main checkout>",
   "review_verdict": "PASS",
-  "timestamp": "2026-07-26T10:15:00Z"
+  "timestamp": "2026-07-27T10:15:00Z"
 }
 ```
 
@@ -572,83 +598,65 @@ orca orchestration gate-create \
 
 ## 7. Phase 3 — User Confirmation
 
-**Goal**: Present the approved plan to the user for final sign-off before execution begins.
+**Goal**: Present the reviewed plan to the user for final sign-off before any
+worktree or terminal is created.
 
 ### 7.1 Entry Condition
 
 - State: `CONFIRMING`
-- Input: Approved plan artifact from Phase 2
+- Input: Approved plan (text) from Phase 2
 
 ### 7.2 Process
+
+Three options only — **Approve / Revise / Abort** — asked via the coordinator's
+native channel:
 
 ```
 confirm_round = 0
 
-while confirm_round < MAX_USER_CONFIRM:
-    response = await ask_coordinator(
-        f"✅ Technical plan has passed internal review.\n\n"
+while confirm_round < MAX_USER_CONFIRM:          # default 3
+    response = await ask_user_via_native_channel(
+        "✅ The technical plan has passed internal review.\n\n"
         f"Summary:\n{plan_summary}\n\n"
-        f"Do you approve this plan?",
-        options=[
-            "Approve — begin execution",
-            "Revise — provide feedback",
-            "Reduce scope — keep partial work only (no PR / no worktree)",
-            "Abort — cancel the task"
-        ]
-    )
+        "Do you approve this plan?",
+        options=["Approve — begin execution",
+                 "Revise — provide feedback",
+                 "Abort — cancel the task"])
 
     if response == "Approve":
-        transition to DISPATCHING
-        break
+        transition to DISPATCHING; break
+    if response == "Abort":
+        transition to TERMINATED (Terminate2)     # IMMEDIATE — at ANY round,
+        break                                     # including the first
 
+    # response == "Revise"
     confirm_round += 1
     if confirm_round < MAX_USER_CONFIRM:
-        if response == "Revise":
-            # Collect feedback, return to Phase 2 with reset review counter
-            transition to PLANNING (with user_feedback)
-        elif response == "Reduce scope":
-            # User explicitly limits side-effects. Record scope_reduction in state,
-            # skip Phase 4 worktree creation, ship artifacts in-place, mark
-            # delivery_mode=degraded even when all subtasks pass.
-            set_scope_reduction_flag({
-                "skip_worktree": true,
-                "skip_pr": true,
-                "reason": user_reason
-            })
-            transition to DISPATCHING (in-place, no worktree)
-        elif response == "Abort":
-            transition to TERMINATED (Terminate2)
+        transition to PLANNING (with user_feedback)   # review counter resets
     else:
-        # Force decision
-        force = await ask_coordinator(
+        force = await ask_user_via_native_channel(
             f"Plan has been revised {confirm_round} times without approval.\n"
-            f"Current state: {plan_summary}\n\n"
-            f"Choose: continue revising, or terminate.",
-            options=["Continue revising", "Terminate"]
-        )
+            "Choose: continue revising, or terminate.",
+            options=["Continue revising", "Terminate"])
         if force == "Continue revising":
-            confirm_round = 0  # reset
+            confirm_round = 0
             transition to PLANNING
         else:
             transition to TERMINATED (Terminate2)
 ```
 
-#### 7.2.1 Scope-Reduction Contract
+**Abort is immediate at any round** — including round 0. v2.1.0 waited for the
+round counter before honouring Abort (an off-by-one); v2.2.0 terminates as soon
+as the user says so.
 
-When the user chooses **"Reduce scope"** at Phase 3, the workflow records
-`scope_reduction` in the state file and applies these skip rules:
+#### 7.2.1 Removed option: scope reduction
 
-| Phase | Default | Scope-Reduced |
-|-------|---------|---------------|
-| 4 (Dispatch) | Create `feature/*` worktree | **No new worktree** — operate on the active worktree |
-| 5 (Execute) | Workers write into worktree | Workers write into the active worktree |
-| 6 (Decide) | `delivery_mode: full` when all pass | `delivery_mode: degraded` (state-only, no PR) |
-| 7 (Merge) | `gh pr create` + lifecycle gate | **Skipped** — record `skip_reason: user scope reduction` |
-| 8 (Cleanup) | Remove worktree + branch | `disposition: SKIPPED`, no destructive ops |
-
-This is distinct from the **Degraded Delivery** contract in §10.4, which is
-triggered by subtask *failures*. Scope-reduction is a user-declared outcome
-that applies even when every subtask passes.
+v2.0.1 offered a fourth option, "Reduce scope — work in-place without a
+worktree or PR". It is **removed in v2.2.0**: in-place execution means parallel
+subtask workers write into the **coordinator's own main checkout**, which is
+unsafe (the coordinator must stay on a clean `main`, and `owns`-based
+verification assumes all writes land in the feature worktree). Users who want a
+smaller change should choose **Revise** and narrow the plan instead.
 
 ### 7.3 Output
 
@@ -658,7 +666,7 @@ that applies even when every subtask passes.
   "status": "complete",
   "confirm_rounds": 1,
   "user_decision": "APPROVE",
-  "timestamp": "2026-07-26T10:20:00Z"
+  "timestamp": "2026-07-27T10:20:00Z"
 }
 ```
 
@@ -666,259 +674,195 @@ that applies even when every subtask passes.
 
 ## 8. Phase 4 — Task Decomposition & Dispatch
 
-**Goal**: Break the approved plan into a DAG of subtasks. For **each** sub-task, create its own branch + worktree, and spawn the **first execution terminal** attached to that worktree. Stacked branches preserve parallelism when sub-tasks have dependencies.
+**Goal**: Create the **single** feature worktree + branch, decompose the plan
+into a subtask DAG, compute waves, and dispatch wave 0 — one fresh terminal and
+one new orchestration task per subtask.
 
 ### 8.1 Entry Condition
 
 - State: `DISPATCHING`
 - Input: Approved plan + user confirmation
-- `branch_strategy.mode` from `.orca/workflow-config.json` (default `stacked`)
+- `feature_slug`: short kebab-case slug for the request (e.g. `add-user-prefs`)
 
-### 8.2 Task Decomposition Schema
+### 8.2 Subtask Schema
 
-Each subtask must declare:
+Each subtask in the plan must declare:
 
 ```json
 {
   "id": "sub-1",
-  "title": "Research & Analysis",
-  "description": "Investigate the target codebase and identify integration points",
-  "dependencies": [],
+  "logical_id": "prefs-api",
+  "title": "Preferences API",
+  "deps": [],
+  "owns": ["src/prefs/**", "docs/prefs.md"],
   "complexity": "general",
-  "expected_artifact": "research-notes.md",
+  "spec": "Implement the preferences REST endpoints …",
   "review_criteria": [
-    "All integration points identified",
-    "Dependencies documented",
-    "Risks flagged"
+    "All endpoints return the documented schemas",
+    "Input validation rejects malformed payloads",
+    "Unit tests cover the new handlers"
   ],
-  "timeout_ms": 600000
+  "timeout_ms": 1800000
 }
 ```
+
+- `owns` (NEW in v2.2.0): file/dir globs, relative to the repo root, that this
+  subtask — and only this subtask — may write. Same-wave subtasks must be
+  disjoint (validated in §6.3).
+- `complexity`: `general` | `complex` | `image`.
 
 #### Agent Routing Rules
 
-> 📖 **Agent 选型详见 [`docs/agent-routing.md`](./docs/agent-routing.md)**。
-> 所有偏好集中在一个文件，修改时只需编辑它。
+> 📖 **Agent selection: see [`docs/agent-routing.md`](./docs/agent-routing.md)** — single source of truth.
 
-`complexity` / `task_type` 字段决定 worker 匹配到哪个 `routing.*_agent_type` 配置项：
-- `"complex"` → `complex_execution_agent_type`
-- `"image"` → `image_agent_type`
-- `"general"` 或未设置 → `execution_agent_type`
-- 所有重试耗尽 → `fallback_agent_type`（兜底）
+`complexity` picks the implementation agent; the role picks the rest:
 
-v2.1.0 新增：`task_role`（`execution` / `review` / `fix`）决定 *哪个* Agent 跑这一轮。`execution` 用上面的 `execution_agent_type`；`review` 强制用 `review_agent_type`（默认 `pi`）；`fix` 复用 `execution_agent_type`，并允许在 spec 里覆写为 `complex_execution_agent_type`。
+- `"complex"` → `complex_execution_agent_type` (default `kimi`)
+- `"image"` → `image_agent_type` (default `grok`)
+- `"general"` or unset → `execution_agent_type` (default `claude`)
+- review role → `review_agent_type` (default `pi`) — **always ≠ the implementation agent**
+- fix role → same agent as the subtask's implementation agent
+- integration review → `review_agent_type` (reused; default `pi`)
+- generic failure retries → `fallback_chain` (default `grok,pi`)
 
-### 8.3 Process — per-subtask worktree + branch + first terminal
+`orca terminal create` has **no `--tags` flag** and terminal objects have no
+`type`/`tags` fields. Agent identity is carried by (1) the `--title` prefix
+convention `[<role>:<agent>] …` and (2) the coordinator's state record
+(handle → role/round/agent_type).
+
+### 8.3 Process — one worktree, then wave 0
 
 ```bash
-WORKFLOW_SLUG="${TASK_SLUG}"   # from plan, e.g. "add-user-prefs"
-TS="$(date +%Y%m%d-%H%M)"
-BRANCH_TPL="${ORCA_WORKFLOW_BRANCH_TEMPLATE:-feature/{workflow_slug}/{sub_slug}-{timestamp}}"
-WT_PATH_TPL="${ORCA_WORKFLOW_WORKTREE_PATH_TEMPLATE:-../{workflow_slug}-{sub_slug}}"
+FEATURE_SLUG="add-user-prefs"        # from the plan
+STATE_FILE="${ORCA_WORKFLOW_STATE_FILE:-.orca/workflow-state.json}"
 
-# Step 1: sort sub-tasks topologically so deps are created first
-TOPO_IDS=($(topo_sort "${SUBTASK_IDS[@]}"))
+# 8.3.1 Fetch the base, then create the ONE feature worktree.
+#       `orca worktree create` takes NO positional path arg and NO `--base`.
+git fetch origin main
 
-# Step 2: for each sub-task, create its own wt+branch+terminal
-DISPATCH_FAILED=()
-for SUB in "${TOPO_IDS[@]}"; do
-  # 8.3.1 Resolve base branch (stacked-branches rule)
-  if [ "${#SUB_DEPS[$SUB]}" -eq 0 ]; then
-    BASE_BRANCH="main"
-  else
-    # Base off the FIRST parent's branch (linearized stacks; for diamond DAGs
-    # we rebase onto all parents in §8.4.1).
-    PARENT="${SUB_DEPS[$SUB][0]}"
-    BASE_BRANCH="${SUBTASK_BRANCH[$PARENT]}"
-  fi
+# Resume / existence check first: match by name (idempotent restarts)
+WT_ID=$(orca worktree list --json | jq -r --arg n "$FEATURE_SLUG" \
+  '[.result.worktrees[]? | select(.name == $n)] | .[0].id // empty')
+# (exact JSON field names should be confirmed on first live run)
 
-  SUB_SLUG="${SUB_SLUGS[$SUB]}"   # e.g. "prefs-api"
-  BRANCH="$(apply_template "$BRANCH_TPL" workflow_slug="$WORKFLOW_SLUG" sub_slug="$SUB_SLUG" timestamp="$TS")"
-  WT_PATH="$(apply_template "$WT_PATH_TPL"  workflow_slug="$WORKFLOW_SLUG" sub_slug="$SUB_SLUG")"
+if [ -z "$WT_ID" ]; then
+  WT_JSON=$(orca worktree create --name "$FEATURE_SLUG" --base-branch origin/main --json)
+  WT_ID=$(echo "$WT_JSON"   | jq -r '.result.worktree.id')
+  WT_PATH=$(echo "$WT_JSON" | jq -r '.result.worktree.path')
+  BRANCH=$(echo "$WT_JSON"  | jq -r '.result.worktree.branch_name')
+else
+  WT_PATH=$(orca worktree list --json | jq -r --arg id "$WT_ID" \
+    '.result.worktrees[] | select(.id == $id) | .path')
+  BRANCH="feature/${FEATURE_SLUG}"
+fi
 
-  # 8.3.2 Create the worktree
-  git fetch origin "$BASE_BRANCH"
-  orca worktree create --name "$BRANCH" --base "origin/$BASE_BRANCH" "$WT_PATH"
+# Record in state: worktree {id, path, branch_name, base_branch}
+state_update ".worktree = {id:\"$WT_ID\", path:\"$WT_PATH\", branch_name:\"$BRANCH\", base_branch:\"origin/main\"}"
 
-  # 8.3.3 Stacked: rebase onto parent tip if parent is local-only
-  if [ "$BASE_BRANCH" != "main" ] && [ "$BASE_BRANCH" != "origin/main" ]; then
-    ( cd "$WT_PATH" && git rebase "$BASE_BRANCH" ) || {
-      echo "⚠️  Failed to base $BRANCH off $BASE_BRANCH — escalating"
-      DISPATCH_FAILED+=("$SUB")
-      continue
-    }
-  fi
+# 8.3.2 Decompose the plan into the subtask DAG and compute waves.
+#       wave(sub) = 0 if deps == [] else 1 + max(wave(parent))
+declare -A WAVE
+compute_waves   # fills WAVE[sub-id]; validates acyclicity again
 
-  # 8.3.4 Spawn the FIRST execution terminal attached to this worktree
-  EXEC_AGENT_TYPE=$(resolve_agent_type "${SUB_COMPLEXITIES[$SUB]}")
-  EXEC_TERMINAL=$(orca terminal create \
-    --worktree "$BRANCH" \
-    --title "sub-$SUB r0 execution ($EXEC_AGENT_TYPE)" \
-    --command "$(agent_command_for "$EXEC_AGENT_TYPE")" \
-    --tags "$EXEC_AGENT_TYPE" \
-    --json | jq -r '.result.terminal.handle')
-
-  # 8.3.5 Create orchestration task + dispatch into the new terminal
+# 8.3.3 Dispatch wave 0: per subtask — task-create + FRESH terminal + dispatch --inject
+for SUB in $(subtasks_in_wave 0); do
+  AGENT=$(resolve_agent_type "${COMPLEXITY[$SUB]}")          # §8.2
   TASK_ID=$(orca orchestration task-create \
-    --task-title "Sub: ${SUB_TITLES[$SUB]}" \
-    --display-name "🔧 ${SUB_DISPLAY[$SUB]}" \
-    --spec "${SUB_SPECS[$SUB]}" \
-    --deps "$(echo ${SUB_DEPS[$SUB]} | jq -c '.')" \
+    --task-title "Sub: ${TITLE[$SUB]}" \
+    --display-name "🔧 ${LOGICAL_ID[$SUB]}" \
+    --spec "${SPEC[$SUB]}" \
+    --deps "$(deps_json "$SUB")" \
     --json | jq -r '.result.task.id')
 
-  orca orchestration dispatch \
-    --task "$TASK_ID" \
-    --to "$EXEC_TERMINAL" \
-    --inject \
-    --json > "/tmp/dispatch-${TASK_ID}.json" 2>&1 || DISPATCH_FAILED+=("$SUB")
-
-  # 8.3.6 Record in state so Phase 5/7/8 can find the worktree + terminal
-  record_subtask_state "$SUB" \
-    worktree_path="$WT_PATH" \
-    branch_name="$BRANCH" \
-    base_branch="$BASE_BRANCH" \
-    status="dispatched" \
-    keep_terminal="$EXEC_TERMINAL"
-
-  append_terminal_history "$SUB" \
-    handle="$EXEC_TERMINAL" \
-    role="execution" \
-    round=0 \
-    agent_type="$EXEC_AGENT_TYPE"
-
-  SUBTASK_MAP["$SUB"]="$TASK_ID"
-done
-
-if [ "${#DISPATCH_FAILED[@]}" -gt 0 ]; then
-  echo "⚠️  Phase 4 dispatch failed for: ${DISPATCH_FAILED[*]}"
-  echo "DISPATCH_FAILED=${DISPATCH_FAILED[*]}" >> "$STATE_FILE"
-fi
-```
-
-### 8.4 Worker Selection Logic
-
-`select_worker` now resolves **two** things at once: which **Agent** to run (via `task_type`) and which **role** (via `task_role`). The result is a *new* terminal per call — never a reuse.
-
-```bash
-# Returns: {handle, agent_type} of a freshly-spawned terminal for this role.
-spawn_terminal_for_role() {
-  local sub_id="$1"
-  local task_type="${2:-general}"
-  local task_role="${3:-execution}"     # execution | review | fix
-  local round="${4:-0}"
-
-  case "$task_role" in
-    review)    agent_type="${ORCA_WORKFLOW_REVIEW_AGENT}" ;;
-    fix)
-      # Fix rounds may escalate to the complex-execution Agent if the spec
-      # marks the sub-task as complex.
-      if [ "${SUB_COMPLEXITIES[$sub_id]}" = "complex" ]; then
-        agent_type="${ORCA_WORKFLOW_COMPLEX_EXECUTION_AGENT}"
-      else
-        agent_type="${ORCA_WORKFLOW_EXECUTION_AGENT}"
-      fi
-      ;;
-    *)
-      # execution round (round 0)
-      case "$task_type" in
-        complex) agent_type="${ORCA_WORKFLOW_COMPLEX_EXECUTION_AGENT}" ;;
-        image)   agent_type="${ORCA_WORKFLOW_IMAGE_AGENT}" ;;
-        *)       agent_type="${ORCA_WORKFLOW_EXECUTION_AGENT}" ;;
-      esac
-      ;;
-  esac
-
-  # Match a tagged worker terminal — if none tagged, fall back to the first
-  # available. The terminal may still need to be created if the pool is empty.
-  local handle
-  handle=$(orca terminal list --json | jq -r --arg type "$agent_type" --arg role "$task_role" '
-    [.result.terminals[] | select(.tags[]? == $type or .tags[]? == $role)] | .[0].handle // .result.terminals[0].handle
-  ')
-
-  # v2.1.0: spawn a NEW terminal every time. The dispatch layer reuses the
-  # handle only for routing; the runtime context inside is fresh.
-  local branch="${SUBTASK_BRANCH[$sub_id]}"
-  local new_handle
-  new_handle=$(orca terminal create \
-    --worktree "$branch" \
-    --title "sub-$sub_id r$round $task_role ($agent_type)" \
-    --command "$(agent_command_for "$agent_type")" \
-    --tags "$agent_type,$task_role" \
+  TERM=$(orca terminal create \
+    --worktree "id:$WT_ID" \
+    --title "[execution:$AGENT] sub-$SUB r0" \
+    --command "$(agent_command_for "$AGENT")" \
     --json | jq -r '.result.terminal.handle')
 
-  echo "$new_handle $agent_type"
-}
+  BASE_SHA=$(cd "$WT_PATH" && git rev-parse HEAD)            # record per dispatch
+
+  orca orchestration dispatch --task "$TASK_ID" --to "$TERM" --inject --json
+
+  record_subtask_state "$SUB" \
+    status="dispatched" base_sha="$BASE_SHA" initial_base_sha="$BASE_SHA" keep_terminal="$TERM"
+  # initial_base_sha is written ONCE here (round 0) and never overwritten;
+  # base_sha is refreshed at every later dispatch (§9.2).
+  append_terminal_history "$SUB" handle="$TERM" role="execution" round=0 agent_type="$AGENT"
+done
 ```
 
-#### 报错兜底逻辑（per-subtask, per-round）
+### 8.4 Fallback Chain (per-subtask, per-round)
 
-通用任务失败后按优先级链 **开新终端** 重试。Agent 列表由 `docs/agent-routing.md` 定义：
+When an execution/fix round fails for infrastructure reasons (agent crash,
+CLI error — *not* a review FAIL), retry with the fallback chain. **Each
+fallback attempt is a NEW task + a NEW terminal.**
 
 ```bash
 retry_with_fallback() {
-  local sub_id="$1"
-  local task_id="$2"
-  local task_type="${3:-general}"
-  # 从环境变量读取兜底链，格式: "agent1,agent2,agent3"
-  IFS=',' read -ra agents <<< "${ORCA_WORKFLOW_FALLBACK_CHAIN:-}"
+  local sub_id="$1" failed_task_id="$2" round="$3"
+  IFS=',' read -ra agents <<< "${ORCA_WORKFLOW_FALLBACK_CHAIN:-grok,pi}"
 
+  local prev_task="$failed_task_id"
   for agent in "${agents[@]}"; do
-    # Spawn a FRESH terminal tagged with this fallback agent
-    local handle branch
+    local task_id handle
+    task_id=$(orca orchestration task_create \
+      --task-title "Sub: ${TITLE[$sub_id]} (fallback: $agent)" \
+      --spec "$(build_fallback_spec "$sub_id")" \
+      --parent "$prev_task" \
+      --json | jq -r '.result.task.id')
     handle=$(orca terminal create \
-      --worktree "${SUBTASK_BRANCH[$sub_id]}" \
-      --title "sub-$sub_id fallback ($agent)" \
+      --worktree "id:$WT_ID" \
+      --title "[fallback:$agent] sub-$sub_id r$round" \
       --command "$(agent_command_for "$agent")" \
-      --tags "$agent,fallback" \
       --json | jq -r '.result.terminal.handle')
-
     orca orchestration dispatch --task "$task_id" --to "$handle" --inject --json
-    wait_for_worker "$task_id"
 
-    if [[ "$(get_task_verdict "$task_id")" == "PASS" ]]; then
-      append_terminal_history "$sub_id" handle="$handle" role="fallback" round=-1 agent_type="$agent"
+    if wait_for_worker "$task_id" && [ "$(get_task_verdict "$task_id")" = "PASS" ]; then
+      append_terminal_history "$sub_id" handle="$handle" role="fallback" round="$round" agent_type="$agent"
       return 0
     fi
-    orca terminal close --handle "$handle"   # failed fallback terminal torn down
-    echo "⚠️ $agent failed, trying next..."
+    orca terminal close --terminal "$handle" --json
+    prev_task="$task_id"
+    echo "⚠️ fallback agent $agent failed, trying next…"
   done
-
-  echo "❌ All agents exhausted for sub-$sub_id"
   return 1
 }
 ```
 
-### 8.5 Injected Preamble (sent to each fresh terminal)
+### 8.5 Injected Preamble (sent to every fresh terminal)
 
-Every terminal — whether round-0 execution, review, fix, or fallback — receives the same preamble shape via `dispatch --inject`. The `Role` and `Round` lines are filled in per the spawning call:
+Every terminal — execution, fix, review, fallback, autofix, pr-fix,
+integration-review — receives the same preamble shape via `dispatch --inject`:
 
 ```text
-You are executing subtask "{title}" (sub-{sub_id}) as part of a multi-agent workflow.
+You are the {role} agent for subtask "{title}" (round {round}) in a multi-agent workflow.
 
-Role: {execution | review | fix | fallback}
-Round: {round}
-Worktree: {worktree_path} (branch {branch_name})
-Base: {base_branch}
+Worktree: {worktree_path}   (SHARED feature worktree — sibling subtasks run here in parallel)
+Branch: {branch_name}
+Base SHA at this dispatch: {base_sha}
+Your ownership (owns): {owns_globs}
 
 ## Rules
-1. You are ONE round of a sub-task. Other rounds — including cross-review — are
-   spawned as separate terminals by the coordinator; do NOT try to review your
-   own output.
-2. If you are execution/fix: produce the artifact in the worktree above, then
-   set status=completed with result={"verdict":"PASS","artifact":"path"}.
-   If you are review: cross-review the latest commits/files in the worktree
-   against {review_criteria}, then set status=completed with
-   result={"verdict":"PASS"} or {"verdict":"FAIL","reason":"..."}.
-3. Do NOT alert the coordinator on failure — the coordinator collects all results.
-4. When done, emit worker_done per your terminal's preamble protocol.
+1. Work ONLY within paths matched by your owns globs. Never create, modify, or
+   delete files outside them — the coordinator verifies after each round and
+   reverts any out-of-owns writes.
+2. Execution/fix only: commit your work in SMALL COMMITS on the branch above.
+3. Review only: you are READ-ONLY. Review `git diff {base_sha}..HEAD` limited
+   to the owns globs, against the review criteria below.
+4. You are ONE round of one subtask. Do not review your own output; do not
+   dispatch other agents; do not push, merge, or create PRs.
+5. When finished, emit worker_done EXACTLY ONCE to the coordinator handle with
+   {taskId, dispatchId, verdict, artifact summary}, then idle. Put the verdict
+   in BOTH the subject (prefix "PASS"/"FAIL") and the payload
+   ({"verdict":"PASS"|"FAIL","reason":...}) — the coordinator reads the payload
+   first and falls back to the subject prefix (smoke-run finding: some agents
+   only write the subject).
 
-## Context
-{plan_summary}
-
-## Your Task
+## Task spec
 {spec}
 
-## Previous round feedback (review/fix only)
+## Prior feedback (round > 0 only)
 {prior_feedback}
 ```
 
@@ -928,26 +872,26 @@ Base: {base_branch}
 {
   "phase": "DISPATCHING",
   "status": "complete",
+  "feature_slug": "add-user-prefs",
+  "worktree": {
+    "id": "wt_abc123",
+    "path": "../add-user-prefs",
+    "branch_name": "feature/add-user-prefs",
+    "base_branch": "origin/main"
+  },
+  "waves": [["sub-1", "sub-2"], ["sub-3"]],
   "subtasks": [
     {
       "id": "sub-1",
       "logical_id": "prefs-api",
       "orchestration_id": "task_xxx",
-      "worktree_path": "../add-user-prefs-prefs-api",
-      "branch_name": "feature/add-user-prefs/prefs-api-20260727-1030",
-      "base_branch": "main",
+      "owns": ["src/prefs/**", "docs/prefs.md"],
+      "base_sha": "a1b2c3d",
+      "initial_base_sha": "a1b2c3d",
       "keep_terminal": "term_yyy",
-      "terminals": [{"handle":"term_yyy","role":"execution","round":0,"agent_type":"claude"}]
-    },
-    {
-      "id": "sub-2",
-      "logical_id": "prefs-ui",
-      "orchestration_id": "task_aaa",
-      "worktree_path": "../add-user-prefs-prefs-ui",
-      "branch_name": "feature/add-user-prefs/prefs-ui-20260727-1030",
-      "base_branch": "feature/add-user-prefs/prefs-api-20260727-1030",
-      "keep_terminal": "term_bbb",
-      "terminals": [{"handle":"term_bbb","role":"execution","round":0,"agent_type":"claude"}]
+      "terminals": [
+        {"handle": "term_yyy", "role": "execution", "round": 0, "agent_type": "claude", "status": "dispatched"}
+      ]
     }
   ],
   "timestamp": "2026-07-27T10:30:00Z"
@@ -958,137 +902,132 @@ Base: {base_branch}
 
 ## 9. Phase 5 — Parallel Execution & Sub-Review
 
-**Goal**: Each sub-task independently goes through a **per-round cross-review** loop. **Every round spawns a fresh terminal** in the sub-task's worktree — no Agent context is reused across rounds. The coordinator does not intervene until all sub-tasks reach a terminal verdict.
+**Goal**: Run the subtask DAG **wave by wave** inside the shared feature
+worktree. Within a wave, subtasks run in parallel (their `owns` are disjoint);
+each subtask goes through a per-round **implement → cross-review** loop where
+every round is a **fresh terminal + NEW task**.
 
 ### 9.1 Entry Condition
 
 - State: `EXECUTING`
-- Every sub-task has `worktree_path`, `branch_name`, `base_branch`, and a `keep_terminal` (round-0 execution terminal) recorded in state from Phase 4
+- The feature worktree exists and wave 0 has been dispatched (Phase 4)
 
-### 9.2 Per-Sub-Task Round Loop
+### 9.2 Per-Subtask Round Loop
+
+Rounds are numbered **0..MAX_SUB_RETRY** (default 3): round 0 is the initial
+attempt, rounds 1..3 are ≤ 3 retries. Each round = one execution/fix dispatch +
+one cross-review dispatch.
 
 ```
-MAX_SUB_RETRY = ORCA_WORKFLOW_MAX_SUB_RETRY  (default 3)
+MAX_SUB_RETRY = ORCA_WORKFLOW_MAX_SUB_RETRY   # default 3
 
-For each sub-task (parallel across sub-tasks):
+For each subtask in the current wave (in parallel):
 
   round = 0
-  last_verdict = null
-  last_feedback = null
+  prior_feedback = null
+  prev_task_id = subtask.orchestration_id     # round-0 task from Phase 4
 
   while round <= MAX_SUB_RETRY:
-    if round == 0:
-      # Round 0's execution terminal was created in Phase 4 and dispatched
-      # there. Wait for it; don't spawn a new one.
-      exec_handle = subtask.keep_terminal
-      role = "execution"
-      task_id = subtask.orchestration_id
-    else:
-      # Subsequent rounds: ALWAYS spawn a fresh terminal
-      exec_handle, exec_agent = spawn_terminal_for_role(
-        sub_id=subtask.id,
-        task_type=subtask.complexity,
-        task_role="fix",         # round > 0 means fix-after-review
-        round=round,
-      )
-      role = "fix"
-      task_id = f"fix-{subtask.id}-r{round}"
-      subtask.keep_terminal = exec_handle   # newest implementation wins
-      append_terminal_history(subtask.id, handle=exec_handle, role="execution", round=round, agent_type=exec_agent)
-
-    # Dispatch (or wait, for round 0) and block until verdict
+    # ---- Execution (round 0) or fix (round > 0) ----
     if round > 0:
-      dispatch_and_wait(
-        task_id=task_id,
-        to=exec_handle,
-        spec=build_fix_spec(subtask, last_feedback),
-        timeout_ms=subtask.timeout_ms,
-      )
+      subtask.base_sha = (cd $WT_PATH && git rev-parse HEAD)   # per dispatch
+      exec_task_id = task_create(spec=build_fix_spec(subtask, prior_feedback),
+                                 parent=prev_task_id)          # NEW task, chained;
+                                                               # NEVER re-dispatch the old one —
+                                                               # Orca circuit-breaks a task after
+                                                               # 3 consecutive failures
+      exec_handle = terminal_create(fresh, title="[fix:<agent>] sub-N r{round}")
+      dispatch(task=exec_task_id, to=exec_handle, inject=True)
+      prev_task_id = exec_task_id
+      subtask.keep_terminal = exec_handle
+      append_terminal_history(role="fix", round=round)
     else:
-      wait_for_worker(task_id, timeout_ms=subtask.timeout_ms)
+      wait_for_worker(prev_task_id)           # round 0 was dispatched in Phase 4
 
-    close_intermediate_terminals_for_round(subtask.id, role)   # not the keep_terminal
+    # ---- Coordinator verification (owns enforcement) ----
+    offending = git_paths_outside_owns(subtask.base_sha, subtask.owns)   # git status/diff
+    if offending is non-empty:
+      revert_offending_paths(offending)       # git checkout -- <paths> / git clean -fd <paths>
+      record error; treat the round as FAIL with feedback "owns violation: <paths>"
 
-    # ---- Cross-review: a fresh terminal with the review agent ----
-    review_handle, review_agent = spawn_terminal_for_role(
-      sub_id=subtask.id,
-      task_type="general",
-      task_role="review",
-      round=round,
-    )
-    append_terminal_history(subtask.id, handle=review_handle, role="review", round=round, agent_type=review_agent)
+    # ---- Cross-review: FRESH terminal, review agent ≠ implementation agent ----
+    review_task_id = task_create(spec=build_review_spec(subtask, base_sha=subtask.base_sha),
+                                 parent=prev_task_id)
+    review_handle = terminal_create(fresh, title="[review:<review_agent>] sub-N r{round}")
+    dispatch(task=review_task_id, to=review_handle, inject=True)
+    verdict = wait_for_worker(review_task_id)
+    terminal_close(review_handle)             # reviewer torn down after verdict
+    append_terminal_history(role="review", round=round, verdict=verdict)
 
-    review_task_id = f"review-{subtask.id}-r{round}"
-    review_verdict = dispatch_and_wait(
-      task_id=review_task_id,
-      to=review_handle,
-      spec=build_review_spec(subtask, latest_diff=subtask.worktree_path),
-      timeout_ms=subtask.timeout_ms,
-    )
-    orca terminal close --handle "$review_handle"   # reviewer is read-only; torn down after verdict
+    if verdict == "PASS":
+      record_subtask_state(verdict="PASS", review_rounds=round); break
 
-    if review_verdict == "PASS":
-      last_verdict = "PASS"
-      break
-    else:
-      last_feedback = review_verdict.reason
-      round += 1
-      if round > MAX_SUB_RETRY:
-        last_verdict = "FAIL"
-        break
-      # Loop continues: fresh execution terminal will be spawned at the top
-
-  record_subtask_state(subtask.id, status="completed", verdict=last_verdict, review_rounds=round)
+    prior_feedback = verdict.feedback
+    round += 1
+    if round > MAX_SUB_RETRY:
+      record_subtask_state(verdict="FAIL", reason="review never passed",
+                           review_rounds=MAX_SUB_RETRY)   # siblings continue
 ```
 
 **Key invariants**:
-- Round 0's execution terminal is reused from Phase 4 (no double-spawn).
-- Every round > 0 spawns a **fresh** execution terminal tagged with the fix Agent.
-- Every round's review terminal is a **fresh** terminal tagged with the review Agent.
-- Reviewer terminals are torn down after verdict — they don't carry state.
-- The most recent execution terminal is `keep_terminal` and survives until Phase 8.
 
-### 9.3 Coordinator-Side Wait
+- Every round (execution, fix, review) is a **fresh terminal + NEW task**;
+  tasks are chained with `--parent` to preserve history.
+- The implementation/fix agent **must commit in small commits**; the review
+  agent reviews **only** `git diff <base_sha>..HEAD` limited to the subtask's
+  `owns`, where `base_sha` is the feature-branch HEAD recorded at that dispatch.
+- The review agent is never the same agent type as the implementation agent.
+- A subtask that fails its final round's review gets `verdict=FAIL`; its
+  siblings continue unaffected.
 
-The coordinator drives the loop in §9.2 for every sub-task **in parallel**. Sub-task loops don't block each other — `wait_for_worker` is per-task. The coordinator only collects results when **all** sub-tasks reach `verdict=PASS|FAIL`.
+### 9.3 Coordinator-Side Wait (rolling checkpoints)
+
+The coordinator waits with `orca orchestration check --wait` in a **rolling
+loop**. A timeout is a **checkpoint, not a failure** — long coding tasks
+routinely take 15–60 minutes.
 
 ```bash
-# Fan out: launch the per-sub-task loop concurrently
-declare -A SUBTASK_VERDICTS
 while :; do
-  ALL_DONE=true
-  for SUB in "${TOPO_IDS[@]}"; do
-    local v="${SUBTASK_VERDICTS[$SUB]:-}"
-    if [ -z "$v" ]; then
-      # not done yet — check the latest verdict in state
-      v=$(jq -r --arg id "$SUB" '.tasks.subtasks[] | select(.id == $id) | .verdict' "$STATE_FILE")
-      SUBTASK_VERDICTS["$SUB"]="$v"
-    fi
-    if [ -z "$v" ]; then ALL_DONE=false; fi
-  done
-  $ALL_DONE && break
-  sleep 5
-done
+  EVENT=$(orca orchestration check --wait \
+    --types worker_done,escalation,decision_gate \
+    --timeout-ms 300000 --json)
 
-echo "All subtasks have completed."
+  if is_timeout "$EVENT"; then
+    # Checkpoint: verify liveness instead of failing.
+    orca orchestration task-list --json | jq '.result.tasks[] | {id,status}'
+    # Optionally read the terminal output of any task stuck in `dispatched`
+    # to confirm the worker is still making progress.
+    continue
+  fi
+
+  handle_event "$EVENT"     # worker_done → record verdict; escalation → native channel
+                            # verdict extraction: payload.verdict first, then the
+                            # subject's "PASS"/"FAIL" prefix as fallback (§8.5 rule 5)
+  all_wave_verdicts_in && break
+done
 ```
 
-### 9.4 Timeout Handling
+When every subtask in wave k has `verdict=PASS`, the coordinator dispatches
+wave k+1 (same procedure as §8.3.3; each subtask sees its parents' committed
+code in the shared worktree). Subtasks whose parents FAILED are skipped and
+inherit `verdict=FAIL` with reason `"parent failed"`.
 
-If any **terminal** exceeds its `timeout_ms`, that terminal is closed and the sub-task fails that round (or escalates to Phase 6 if it's the keep_terminal).
+### 9.4 Wall-Clock Timeout Handling
+
+Subtask wall-clock timeouts are enforced by the **coordinator**, which tracks
+elapsed time per subtask (workers do not self-terminate):
 
 ```bash
-# Per-terminal timeout enforced inside dispatch_and_wait via:
-#   - signal SIGTERM after timeout_ms
-#   - then `orca terminal close --handle "$handle"`
-#   - record verdict=FAIL reason="Terminal timeout after ${ms}ms"
-
-orca orchestration task-update \
-  --id "$TIMED_OUT_TASK_ID" \
-  --status "failed" \
-  --result '{"verdict":"FAIL","reason":"Terminal timeout","round":-1}' \
-  --json
+if [ "$elapsed_ms" -gt "${TIMEOUT_MS[$SUB]}" ]; then
+  orca orchestration task-update --id "$TASK_ID" --status failed \
+    --result '{"verdict":"FAIL","reason":"wall-clock timeout"}'
+  orca terminal close --terminal "$HANDLE" --json
+  record_subtask_state "$SUB" verdict="FAIL" reason="timeout after ${elapsed_ms}ms"
+fi
 ```
+
+Infrastructure-level execution failures (agent crash, CLI error) may retry via
+the fallback chain (§8.4) — each fallback attempt is a NEW task + NEW terminal.
 
 ### 9.5 Output
 
@@ -1100,19 +1039,17 @@ orca orchestration task-update \
     {
       "id": "sub-1",
       "verdict": "PASS",
-      "artifact": "research-notes.md",
+      "owns": ["src/prefs/**", "docs/prefs.md"],
       "review_rounds": 1,
-      "worktree_path": "../add-user-prefs-prefs-api",
-      "branch_name": "feature/add-user-prefs/prefs-api-20260727-1030",
       "terminals": [
-        {"handle":"term_yyy","role":"execution","round":0,"agent_type":"claude","verdict":"PASS"},
-        {"handle":"term_rrr","role":"review",   "round":0,"agent_type":"pi",   "verdict":"FAIL"},
-        {"handle":"term_zzz","role":"execution","round":1,"agent_type":"claude","verdict":"PASS"},
-        {"handle":"term_sss","role":"review",   "round":1,"agent_type":"pi",   "verdict":"PASS"}
+        {"handle": "term_yyy", "role": "execution", "round": 0, "agent_type": "claude", "status": "completed", "verdict": "PASS"},
+        {"handle": "term_rrr", "role": "review", "round": 0, "agent_type": "pi", "status": "closed", "verdict": "FAIL"},
+        {"handle": "term_zzz", "role": "fix", "round": 1, "agent_type": "claude", "status": "completed", "verdict": "PASS"},
+        {"handle": "term_sss", "role": "review", "round": 1, "agent_type": "pi", "status": "closed", "verdict": "PASS"}
       ],
       "keep_terminal": "term_zzz"
     },
-    {"id":"sub-2","verdict":"FAIL","reason":"Cross-review never passed after 3 rounds","review_rounds":3}
+    {"id": "sub-2", "verdict": "FAIL", "reason": "Cross-review never passed after 3 retries", "review_rounds": 3}
   ],
   "timestamp": "2026-07-27T11:00:00Z"
 }
@@ -1122,17 +1059,19 @@ orca orchestration task-update \
 
 ## 10. Phase 6 — Aggregation & Decision
 
-**Goal**: Collect all subtask results (pass + fail), analyze, and decide next action.
+**Goal**: Collect every subtask verdict (pass + fail), then either proceed or
+ask the user — via the coordinator's **native channel** — how to handle the
+failures.
 
 ### 10.1 Entry Condition
 
 - State: `DECIDING`
-- All workers have reported done
+- All dispatched subtasks have a terminal verdict (`PASS` or `FAIL`)
 
 ### 10.2 Decision Matrix
 
 ```
-global_retry_count = 0
+global_retries_used = 0        # persisted in state.retry_counts
 
 analyze_results(all_subtask_results):
 
@@ -1142,79 +1081,80 @@ analyze_results(all_subtask_results):
 
   failed = [r for r in all_subtask_results if r.verdict == "FAIL"]
 
-  while global_retry_count < MAX_GLOBAL_RETRIES:
-    decision = present_decision_to_coordinator(
-      passed=len(passed),
-      failed=failed,
-      retry_count=global_retry_count
-    )
+  decision = await ask_user_via_native_channel(
+    f"{len(failed)} subtask(s) failed. Passed: {len(passed)}.\n"
+    f"Failed: {format_failures(failed)}\n\n"
+    f"What should we do?",
+    options=[
+      "Retry failed subtasks only",        # offered ONLY while the guard below holds
+      "Degrade — revert failures, deliver the rest",
+      "Abort — cancel the workflow",
+    ])
 
-    switch decision:
-      case "RETRY_FAILED":
-        global_retry_count += 1
-        if global_retry_count < MAX_GLOBAL_RETRIES:
-          transition to DISPATCHING (only failed items)
-          return
-        else:
-          force_escalate()
+  switch decision:
+    case "Retry failed subtasks only":
+      # Guard checked BEFORE incrementing → at most MAX_GLOBAL_RETRY (2) retries
+      if global_retries_used < MAX_GLOBAL_RETRY:
+        global_retries_used += 1
+        transition to DISPATCHING (re-dispatch ONLY the failed subtasks:
+                                   fresh terminals + NEW tasks, same worktree)
+      else:
+        re-ask without the retry option
 
-      case "DEGRADE_DELIVER":
-        set_partial_delivery_flag()
-        transition to MERGING
-        return
+    case "Degrade":
+      # The coordinator reverts each failed subtask's commit range in the
+      # feature worktree. This is clean because owns are disjoint — the
+      # revert touches only that subtask's files.
+      for sub in failed:
+        (cd $WT_PATH && git revert --no-commit <sub.initial_base_sha>..HEAD -- <sub.owns…>)
+        # initial_base_sha = feature-branch HEAD at the subtask's round-0
+        # dispatch (recorded once in state); the revert therefore covers ALL
+        # of the failed subtask's rounds, limited to its owns.
+        if revert is unclean:
+          park the WHOLE feature → PARKED (§12); return
+      delivery_mode = "degraded"
+      transition to MERGING
 
-      case "ESCALATE_HUMAN":
-        human_decision = await ask_coordinator(
-          f"{len(failed)} subtasks failed (global retry {global_retry_count}/{MAX_GLOBAL_RETRIES}).\n"
-          f"Failed: {format_failures(failed)}\n"
-          f"Passed: {len(passed)} items ready.\n\n"
-          f"What should we do?",
-          options=["Retry failed items", "Accept partial delivery", "Abort"]
-        )
-        switch human_decision:
-          case "Retry": → continue loop
-          case "Accept partial": → set_partial_delivery_flag(); transition to MERGING; return
-          case "Abort": → transition to TERMINATED (Terminate3); return
+    case "Abort":
+      transition to TERMINATED (Terminate3)
 ```
 
 ### 10.3 Shell Implementation
 
 ```bash
-# Gather results
-PASSED=()
-FAILED=()
-for TASK_ID in "${SUBTASK_ORCH_IDS[@]}"; do
-  RESULT=$(orca orchestration task-list --json | jq -r --arg id "$TASK_ID" \
-    '.result.tasks[] | select(.id == $id) | .result')
-  VERDICT=$(echo "$RESULT" | jq -r '.verdict')
-  if [ "$VERDICT" = "PASS" ]; then
-    PASSED+=("$TASK_ID")
-  else
-    FAILED+=("$TASK_ID")
-  fi
-done
+# Gather verdicts from state
+PASSED=$(jq -r '.tasks.subtasks[] | select(.verdict == "PASS") | .id' "$STATE_FILE")
+FAILED=$(jq -r '.tasks.subtasks[] | select(.verdict == "FAIL") | .id' "$STATE_FILE")
 
-if [ ${#FAILED[@]} -eq 0 ]; then
+if [ -z "$FAILED" ]; then
   echo "✅ All subtasks passed. Proceeding to merge."
 else
-  echo "⚠️ ${#FAILED[@]} subtask(s) failed: ${FAILED[*]}"
-  # Present decision to coordinator
-  orca orchestration ask \
-    --to coordinator \
-    --question "${#FAILED[@]} subtask(s) failed. Passed: ${#PASSED[@]}.\nFailed: ${FAILED[*]}\n\nChoose action:" \
-    --options "Retry failed items,Degrade (deliver passed items only),Abort"
+  RETRIES_USED=$(jq -r '.retry_counts.global_retries_used // 0' "$STATE_FILE")
+  echo "⚠️ failed: $FAILED (global retries used: $RETRIES_USED/$ORCA_WORKFLOW_MAX_GLOBAL_RETRY)"
+  # Present the decision via the coordinator's NATIVE channel (never ask --to coordinator)
 fi
+
+# Degrade: revert a failed subtask's commits (clean because owns are disjoint)
+# before_sha = the subtask's initial_base_sha from state (round-0 dispatch HEAD)
+degrade_revert() {
+  local sub="$1" before_sha="$2" last_sha="${3:-HEAD}"
+  ( cd "$WT_PATH" && git revert --no-commit "${before_sha}..${last_sha}" ) || {
+    echo "⚠️ revert of sub-$sub is unclean — parking the whole feature"
+    park_feature "degrade revert conflict on sub-$sub"
+    return 1
+  }
+  ( cd "$WT_PATH" && git commit -m "revert: drop failed subtask $sub" )
+}
 ```
 
 ### 10.4 Degraded Delivery Contract
 
-When `DEGRADE_DELIVER` is chosen:
+When **Degrade** is chosen:
 
-1. A `PARTIAL_DELIVERY.md` manifest is created listing:
-   - ✅ Delivered artifacts
-   - ❌ Failed items with reason and suggested manual follow-up
-2. The PR description includes a `⚠️ PARTIAL DELIVERY` banner
-3. The state file records `delivery_mode: "degraded"`
+1. Each failed subtask's commit range is reverted in the feature worktree (§10.2).
+2. The state file records `delivery_mode: "degraded"`.
+3. The PR body (§11.5) carries a `⚠️ DEGRADED DELIVERY` banner listing the
+   dropped subtasks, their failure reasons, and suggested manual follow-up.
 
 ### 10.5 Output
 
@@ -1223,198 +1163,199 @@ When `DEGRADE_DELIVER` is chosen:
   "phase": "DECIDING",
   "status": "complete",
   "all_passed": false,
-  "decision": "DEGRADE_DELIVER",
+  "decision": "DEGRADE",
   "passed_count": 2,
   "failed_count": 1,
   "global_retries_used": 1,
   "delivery_mode": "degraded",
-  "timestamp": "2026-07-26T11:05:00Z"
+  "timestamp": "2026-07-27T11:05:00Z"
 }
 ```
 
 ---
 
-## 11. Phase 7 — Merge & Pull Request (per-subtask, stacked)
+## 11. Phase 7 — Merge & Pull Request
 
-**Goal**: For **each** sub-task, rebase onto its resolved base, create a PR, and guide it through review → merge. Dependent sub-tasks target their parent's branch as a draft until the parent merges; then the stacked-PR rebase hook (§11.8) flips the base to `main` and promotes the PR.
+**Goal**: Rebase the single feature branch onto `origin/main`, run the project
+tests, pass the **integration review**, create **one PR**, and monitor it to a
+terminal state. All git operations run inside the feature worktree via
+`(cd <wt> && git …)`; the coordinator never checks anything out itself.
 
 ### 11.1 Entry Condition
 
 - State: `MERGING`
-- Each sub-task in `tasks.subtasks[]` has `verdict=PASS` (or `DEGRADE_DELIVER` was chosen in Phase 6)
-- `branch_strategy.rebase_on_parent_merge` from config (default `true`)
+- All subtasks passed, or Phase 6 chose **Degrade** (failed ranges already reverted)
 
-### 11.2 Process — per-sub-task PR creation in topological order
+### 11.2 Rebase + Autofix Loop
 
 ```bash
-for SUB in "${TOPO_IDS[@]}"; do   # topological: deps-less first, then dependents
-  BRANCH="${SUBTASK_BRANCH[$SUB]}"
-  WT="${SUBTASK_WT[$SUB]}"
-  BASE="${SUBTASK_BASE[$SUB]}"
-  PR_BASE="$BASE"
+cd "$WT_PATH"   # conceptually — every command runs as (cd "$WT_PATH" && …)
+git fetch origin main
+git rebase origin/main
 
-  # 11.2.1 Skip sub-tasks whose verdict is FAIL/PARKED
-  if [ "${SUBTASK_VERDICT[$SUB]}" != "PASS" ]; then
-    record_subtask_state "$SUB" pr_state="SKIPPED"
-    continue
+autofix_count=0
+while rebase_in_progress && [ $autofix_count -lt $MAX_AUTOFIX ]; do   # default 2
+  autofix_count=$((autofix_count + 1))
+  CONFLICT_FILES=$(git diff --name-only --diff-filter=U)
+  echo "⚠️ rebase conflict (attempt $autofix_count/$MAX_AUTOFIX): $CONFLICT_FILES"
+
+  # FRESH terminal resolves conflicts and continues the rebase
+  AF_TASK=$(orca orchestration task-create \
+    --task-title "autofix rebase $FEATURE_SLUG ($autofix_count)" \
+    --spec "Resolve the merge conflicts in:\n$CONFLICT_FILES\nThen: git add -A && git rebase --continue. Do NOT push." \
+    --json | jq -r '.result.task.id')
+  AF_TERM=$(orca terminal create --worktree "id:$WT_ID" \
+    --title "[autofix:$EXEC_AGENT] rebase $autofix_count" \
+    --command "$(agent_command_for "$EXEC_AGENT")" --json | jq -r '.result.terminal.handle')
+  orca orchestration dispatch --task "$AF_TASK" --to "$AF_TERM" --inject --json
+  wait_for_worker "$AF_TASK"
+  orca terminal close --terminal "$AF_TERM" --json
+
+  # SUCCESS requires BOTH: the rebase has completed AND zero remaining ^UU files
+  if ! rebase_in_progress && [ -z "$(git diff --name-only --diff-filter=U)" ]; then
+    break
   fi
+done
 
-  # 11.2.2 Rebase onto resolved base (auto-fix loop)
-  autofix_count=0
-  while [ $autofix_count -lt $MAX_AUTOFIX ]; do
-    ( cd "$WT" && git fetch origin "$BASE" && git rebase "$BASE" ) && break
-    autofix_count=$((autofix_count + 1))
-    CONFLICT_FILES=$(cd "$WT" && git diff --name-only --diff-filter=U)
-    echo "⚠️  sub-$SUB conflict (attempt $autofix_count/$MAX_AUTOFIX): $CONFLICT_FILES"
-    auto_resolve_conflicts_in_wt "$WT" "$CONFLICT_FILES" || break
-  done
+if rebase_in_progress || [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+  # Any autofix failure → HUMAN decision (native channel): manual resolve or PARK
+  ask_user_via_native_channel "Rebase conflicts unresolved after $MAX_AUTOFIX autofix attempts." \
+    options=["I resolved it manually — continue", "Park the feature"]
+fi
+```
 
-  if [ $autofix_count -ge $MAX_AUTOFIX ]; then
-    # 11.2.3 Escalate: per-subtask parking
-    orca orchestration ask \
-      --to coordinator \
-      --question "⚠️ sub-$SUB: merge conflicts unresolvable after $MAX_AUTOFIX attempts.\nFiles: $CONFLICT_FILES\nResolve or park this sub-task only?" \
-      --options "Resolved — continue,Park — keep sub-task for later"
-    # If park: write .orca/parked/<sub>.md and skip to next sub-task
-    park_subtask "$SUB"
-    continue
-  fi
+The success check is deliberately strict: a completed `git rebase --continue`
+alone is **not** sufficient — there must also be zero unmerged (`^UU`) paths
+before the loop breaks.
 
-  # 11.2.4 Push branch
-  ( cd "$WT" && git push -u origin "$BRANCH" ) || { park_subtask "$SUB" "push-failed"; continue; }
+### 11.3 Run the Project Tests
 
-  # 11.2.5 Create PR — draft if stacked
-  DRAFT_FLAG=""
-  [ "$BRANCH_STRATEGY" = "stacked" ] && [ "$PR_BASE" != "main" ] && DRAFT_FLAG="--draft"
+Run the project's own test command inside the feature worktree and record the
+results in state (`phases.MERGING.test_results`):
 
-  PR_BODY=$(build_pr_body "$SUB" "${SUBTASK_RESULTS[$SUB]}")
-  PR_URL=$(gh pr create \
-    --base "$PR_BASE" \
-    --head "$BRANCH" \
-    --title "sub-${SUB}: ${SUBTASK_TITLE[$SUB]}" \
-    --body "$PR_BODY" \
-    $DRAFT_FLAG \
-    2>&1 | tail -1)
+```bash
+( cd "$WT_PATH" && ./scripts/check-prerequisites.sh >/dev/null 2>&1 || true )
+TEST_OUTPUT=$(cd "$WT_PATH" && <project test command> 2>&1)
+TEST_EXIT=$?
+state_update ".phases.MERGING.test_results = {command:\"<project test command>\", exit_code:$TEST_EXIT, ran_at:\"$(date -Iseconds)\"}"
+```
 
-  record_subtask_state "$SUB" pr_url="$PR_URL" pr_base="$PR_BASE" pr_state="OPEN"
+Test failures do not auto-abort: they are fed into the integration review spec
+(§11.4) and surfaced to the user if the review fails.
+
+### 11.4 Integration Review (NEW in v2.2.0)
+
+Before the PR is created, a **fresh review-agent terminal** reviews the
+**whole feature** — not any single subtask. ≤ `MAX_INTEGRATION_REVIEW` (default
+2) rounds.
+
+```python
+ir_round = 0
+while ir_round < MAX_INTEGRATION_REVIEW:            # default 2
+    spec = build_integration_review_spec(
+        plan=plan_text,                              # the approved plan
+        subtask_verdicts=collect_verdicts(),         # per-subtask PASS/FAIL + reasons
+        test_results=phases.MERGING.test_results,    # §11.3
+        diff="git diff origin/main...HEAD",          # three-dot diff of the whole feature
+        mandate="READ-ONLY — do not modify any file",
+    )
+    ir_task = task_create(title=f"integration review r{ir_round}", spec=spec)
+    ir_handle = terminal_create(fresh, title=f"[integration-review:{REVIEW_AGENT}] r{ir_round}")
+    dispatch(task=ir_task, to=ir_handle, inject=True)
+    verdict = await wait_worker_done(ir_task)
+    terminal_close(ir_handle)
+    record integration_review.rounds = ir_round + 1
+
+    if verdict == "PASS":
+        record integration_review.verdict = "PASS"; break
+
+    ir_round += 1
+    if ir_round < MAX_INTEGRATION_REVIEW:
+        # FRESH fix terminal applies the findings and commits
+        fix_task = task_create(title=f"integration fix r{ir_round}",
+                               spec=build_integration_fix_spec(verdict.findings))
+        fix_handle = terminal_create(fresh, title=f"[fix:{EXEC_AGENT}] integration r{ir_round}")
+        dispatch(task=fix_task, to=fix_handle, inject=True)
+        await wait_worker_done(fix_task)             # commits in the feature worktree
+        # loop: ANOTHER fresh review terminal re-reviews
+    else:
+        record integration_review.verdict = "FAIL"
+        human = await ask_user_via_native_channel(
+            "Integration review failed after 2 rounds. Release anyway, or park the feature?",
+            options=["Release anyway", "Park the feature"])
+        # "Release anyway" → continue to §11.5 with the FAIL recorded in the PR body
+        # "Park" → PARKED (§12)
+```
+
+### 11.5 Create the PR
+
+```bash
+PR_BODY=$(build_pr_body)   # contract below
+PR_URL=$(cd "$WT_PATH" && gh pr create \
+  --base main --head "$BRANCH" \
+  --title "feat: $FEATURE_SLUG" \
+  --body "$PR_BODY")
+PR_EXIT=$?
+if [ $PR_EXIT -ne 0 ]; then
+  # ALWAYS check the exit code — never parse a URL out of a failed command
+  echo "⚠️ gh pr create failed (exit $PR_EXIT): $PR_URL"
+  # log, retry once; on second failure escalate to the user (native channel)
+fi
+state_update ".pr = {url:\"$PR_URL\", state:\"OPEN\", merged_at:null}"
+```
+
+**PR body contract** — the body must contain:
+
+1. **Change summary** — what the feature does, from the approved plan.
+2. **Artifacts** — table of produced/changed artifacts with paths.
+3. **Per-subtask review rounds** — each subtask's id, verdict, and round count.
+4. **Integration-review verdict** — rounds used and final verdict.
+5. **`⚠️ DEGRADED DELIVERY` banner** — only when `delivery_mode == "degraded"`,
+   listing dropped subtasks and their failure reasons.
+
+### 11.6 PR Lifecycle Monitoring
+
+Poll `gh pr view` every 60s. **Never create a decision gate inside the poll
+loop** — monitoring is pure observation plus recorded transitions.
+
+```bash
+while :; do
+  read PR_STATE PR_MERGE < <(cd "$WT_PATH" && gh pr view "$PR_URL" \
+    --json state,mergeStateStatus -q '"\(.state) \(.mergeStateStatus)"')
+
+  case "$PR_STATE" in
+    MERGED)
+      state_update ".pr.state = \"MERGED\" | .pr.merged_at = \"$(date -Iseconds)\""
+      transition to CLEANING; break ;;
+    CLOSED)
+      state_update ".pr.state = \"CLOSED\""
+      park_feature "PR closed without merge"; break ;;
+    OPEN)
+      # Changes Requested: reviewer feedback reaches the coordinator (via the
+      # native channel, or on-demand `gh pr view --json reviews`) → fix round
+      if changes_requested; then
+        state_update ".pr.state = \"CHANGES_REQUESTED\""
+        apply_pr_feedback    # see below — then keep monitoring
+      fi ;;
+  esac
+
+  sleep "${PR_REVIEW_POLL_INTERVAL:-60}"   # ms→s per config timeouts_ms.pr_review_poll_interval
 done
 ```
 
-### 11.3 PR Body Builder (per-sub-task)
-
-```markdown
-## Sub-task: {title}
-{sub-task summary from plan}
-
-## Artifacts
-| # | Item | Path |
-|---|------|------|
-| 1 | {artifact-1} | `path/...` |
-| 2 | {artifact-2} | `path/...` |
-
-## Review rounds
-{review_rounds} cross-review round(s) executed; final review verdict PASS.
-
-## Files Changed
-```text
-{git -C $WT diff --stat origin/$BASE}
-```
-
-## Stacked Branch (if applicable)
-This sub-task targets branch `{base_branch}` while its parent is open. The
-coordinator will auto-rebase onto `main` and flip the base once the parent
-PR merges.
-
-## ⚠️ Partial Delivery (if applicable)
-The workflow delivered this sub-task in degraded mode — see state file.
-```
-
-### 11.4 Conflict Auto-Fix (per-sub-task, scoped to its worktree)
+**Handling Changes Requested** — a FRESH pr-fix terminal applies the review
+feedback, commits, and pushes; the poll loop above then keeps monitoring:
 
 ```bash
-auto_resolve_conflicts_in_wt() {
-  local wt="$1"
-  local files="$2"
-  # Spawn a FRESH execution terminal to read conflict markers and resolve
-  local handle
-  handle=$(orca terminal create \
-    --worktree "$(basename "$wt")" \
-    --title "autofix $(basename "$wt")" \
-    --command "$(agent_command_for "$ORCA_WORKFLOW_EXECUTION_AGENT")" \
-    --tags "autofix" \
-    --json | jq -r '.result.terminal.handle')
-
-  orca orchestration dispatch --to "$handle" --inject \
-    --spec "Resolve the merge conflicts in:
-$files
-
-For each conflict, prefer the side that better matches the sub-task's
-acceptance criteria. After resolving, complete the rebase with
-'git add -A && git rebase --continue'. Do NOT push."
-  wait_for_worker "$handle"
-  orca terminal close --handle "$handle"
-
-  # Verify the rebase completed cleanly
-  ( cd "$wt" && git rebase --continue 2>/dev/null || git status --porcelain | grep -q '^UU' )
-}
-```
-
-### 11.5 PR Lifecycle Monitoring (per-sub-task)
-
-Each sub-task has its own gate; sub-tasks are monitored concurrently.
-
-```bash
-monitor_subtask_pr() {
-  local sub="$1"
-  local pr_url="${SUBTASK_PR_URL[$sub]}"
-
-  while :; do
-    local pr_state pr_merge
-    read pr_state pr_merge < <(gh pr view "$pr_url" --json state,mergeStateStatus -q '"\(.state) \(.mergeStateStatus)"')
-
-    case "$pr_state $pr_merge" in
-      "MERGED "*) record_subtask_state "$sub" pr_state="MERGED" merged_at="$(date -Iseconds)"; return 0 ;;
-      "CLOSED "*) record_subtask_state "$sub" pr_state="CLOSED"; return 0 ;;
-      "OPEN BLOCKED"|"OPEN DIRTY")
-        echo "sub-$sub PR blocked; trying auto-fix…"
-        # Same auto-fix loop, no human escalation yet
-        ;;
-      "OPEN CLEAN"|"OPEN UNKNOWN")
-        orca orchestration gate-create \
-          --task "${SUBTASK_TASK[$sub]}" \
-          --question "PR ${pr_url} (sub-${sub}) ready for review." \
-          --options '["Approved & Merged","Changes Requested","Closed"]' \
-          --json
-        ;;
-    esac
-
-    sleep "${PR_REVIEW_POLL_INTERVAL:-60}"
-  done
-}
-```
-
-### 11.6 Handling Review Feedback (Changes Requested)
-
-When a sub-task's PR receives "Changes Requested":
-
-```bash
-# Spawn a fresh execution terminal for the fix-up commit
-fix_handle=$(orca terminal create \
-  --worktree "${SUBTASK_BRANCH[$sub]}" \
-  --title "sub-$sub pr-feedback fix" \
-  --command "$(agent_command_for "$ORCA_WORKFLOW_EXECUTION_AGENT")" \
-  --tags "execution,pr-fix" \
-  --json | jq -r '.result.terminal.handle')
-
-orca orchestration dispatch --to "$fix_handle" --inject \
-  --spec "PR feedback for sub-${sub} on ${pr_url}:
-$pr_feedback
-
-Apply the changes to the worktree at ${WORKTREE_PATH}, commit, and push.
-Then emit worker_done."
-wait_for_worker "$fix_handle"
-record_subtask_state "$sub" keep_terminal="$fix_handle"
-# Loop continues — PR will be re-monitored
+PF_TASK=$(orca orchestration task-create \
+  --task-title "PR feedback fix $FEATURE_SLUG" \
+  --spec "PR review feedback on $PR_URL:\n$pr_feedback\n\nApply the changes in the worktree at $WT_PATH, commit, and push. Then emit worker_done." \
+  --json | jq -r '.result.task.id')
+PF_TERM=$(orca terminal create --worktree "id:$WT_ID" \
+  --title "[pr-fix:$EXEC_AGENT] $FEATURE_SLUG" \
+  --command "$(agent_command_for "$EXEC_AGENT")" --json | jq -r '.result.terminal.handle')
+orca orchestration dispatch --task "$PF_TASK" --to "$PF_TERM" --inject --json
+wait_for_worker "$PF_TASK"        # worker commits + pushes; loop keeps monitoring
 ```
 
 ### 11.7 Output
@@ -1423,185 +1364,135 @@ record_subtask_state "$sub" keep_terminal="$fix_handle"
 {
   "phase": "MERGING",
   "status": "complete",
-  "subtasks": [
-    {"id":"sub-1","pr_url":"https://github.com/org/repo/pull/123","pr_base":"main","pr_state":"MERGED","merged_at":"2026-07-27T11:50:00Z"},
-    {"id":"sub-2","pr_url":"https://github.com/org/repo/pull/124","pr_base":"feature/add-user-prefs/prefs-api-20260727-1030","pr_state":"MERGED","merged_at":"2026-07-27T12:05:00Z"}
-  ],
+  "pr": {
+    "url": "https://github.com/org/repo/pull/123",
+    "state": "MERGED",
+    "merged_at": "2026-07-27T12:05:00Z"
+  },
+  "integration_review": {"rounds": 1, "verdict": "PASS"},
   "delivery_mode": "full",
   "timestamp": "2026-07-27T12:10:00Z"
 }
 ```
 
-### 11.8 Stacked-PR Rebase Hook (NEW)
-
-Whenever a parent sub-task's PR transitions to `MERGED`, every dependent sub-task must be auto-rebased onto the new `main` and have its PR base flipped.
-
-```bash
-on_parent_merge() {
-  local merged_sub="$1"
-  local merged_branch="${SUBTASK_BRANCH[$merged_sub]}"
-
-  for dependent in "${SUBTASK_DEPENDENTS[$merged_sub]}"; do
-    local wt="${SUBTASK_WT[$dependent]}"
-    local branch="${SUBTASK_BRANCH[$dependent]}"
-    local pr_url="${SUBTASK_PR_URL[$dependent]}"
-
-    echo "🔁 Stacked rebase: sub-$dependent → main (parent sub-$merged_sub just merged)"
-
-    ( cd "$wt" && git fetch origin main && git rebase origin/main ) || {
-      echo "⚠️  sub-$dependent stacked rebase failed — opening new fix round"
-      request_fix_round "$dependent" "Stacked rebase conflict after parent merged"
-      continue
-    }
-    ( cd "$wt" && git push --force-with-lease origin "$branch" )
-
-    # Flip PR base: sub-task's PR was targeting parent's branch; now it should target main
-    gh pr edit "$pr_url" --base main 2>/dev/null || true
-
-    # Promote from draft (if it was draft)
-    gh pr ready "$pr_url" 2>/dev/null || true
-
-    record_subtask_state "$dependent" pr_base="main"
-  done
-}
-```
-
-This hook fires after every sub-task transition to `MERGED`, processing its direct dependents. Indirect dependents are reached transitively as their immediate parents merge.
-
 ---
 
-## 12. Phase 8 — Cleanup & Archival (per-subtask)
+## 12. Phase 8 — Cleanup & Archival
 
-**Goal**: For **each** sub-task, delete its remote branch, remove its local worktree, close its keep_terminal, and write a per-sub-task parked manifest when applicable. Cleanup runs in **reverse-topological order** so dependents are torn down before their parents.
+**Goal**: Reach a clean terminal state for the **feature** (not per subtask):
+delete the merged branch + worktree, or preserve them with a parked manifest.
+Handle **every** `pr_state` explicitly.
 
 ### 12.1 Entry Condition
 
 - State: `CLEANING`
-- All sub-tasks have a terminal `pr_state` (`MERGED`, `CLOSED`, `PARKED`, or `SKIPPED`)
+- `pr.state` is terminal: `MERGED` | `CLOSED` | `PARKED` (an `OPEN` PR at
+  cleanup is a guard violation — see §12.2)
 
-### 12.2 Process — per-sub-task cleanup in reverse-topological order
+### 12.2 Process
 
 ```bash
-REVERSE_TOPO=($(reverse_topo_sort "${TOPO_IDS[@]}"))
+PR_STATE=$(jq -r '.pr.state // "null"' "$STATE_FILE")
 
-for SUB in "${REVERSE_TOPO[@]}"; do
-  BRANCH="${SUBTASK_BRANCH[$SUB]}"
-  WT="${SUBTASK_WT[$SUB]}"
-  KEEP_TERM="${SUBTASK_KEEP_TERMINAL[$SUB]}"
-  PR_STATE="${SUBTASK_PR_STATE[$SUB]}"
+case "$PR_STATE" in
+  MERGED)
+    # Full cleanup: delete remote branch, remove the worktree, close terminals
+    git push origin --delete "$BRANCH" || echo "WARN: branch delete failed (may need admin)"
+    orca worktree rm --worktree "id:$WT_ID" --force --json
+    # orca worktree rm removes the worktree but LEAVES the local branch (verified
+    # in the v2.2.0 smoke run) — delete it from the coordinator's main checkout.
+    # Use -D (not -d): a squash-merged PR means the local tip is not an ancestor
+    # of main, so -d would refuse.
+    git branch -D "$BRANCH" || echo "WARN: local branch delete failed"
+    close_all_workflow_terminals      # includes keep_terminal(s)
+    state_update '.phases.CLEANING.disposition = "MERGED"'
+    ;;
 
-  case "$PR_STATE" in
-    MERGED)
-      # 12.2.1 Merged path — full cleanup
-      git push origin --delete "$BRANCH" 2>/dev/null || true
-      orca worktree remove "$BRANCH" 2>/dev/null || true
-      [ -n "$KEEP_TERM" ] && orca terminal close --handle "$KEEP_TERM" 2>/dev/null || true
-      record_subtask_state "$SUB" disposition="MERGED" branch_deleted=true worktree_removed=true
-      ;;
+  PARKED|CLOSED)
+    # Preserve: write the parked manifest, KEEP worktree + branch, close terminals
+    write_parked_manifest             # §12.3
+    close_all_workflow_terminals
+    state_update '.phases.CLEANING.disposition = "PARKED"'
+    ;;
 
-    PARKED)
-      # 12.2.2 Parked path — write per-sub-task manifest, leave worktree
-      write_parked_manifest "$SUB"
-      [ -n "$KEEP_TERM" ] && orca terminal close --handle "$KEEP_TERM" 2>/dev/null || true
-      record_subtask_state "$SUB" disposition="PARKED" park_manifest=".orca/parked/${SUB}.md"
-      ;;
+  OPEN|CHANGES_REQUESTED)
+    # Guard: cleanup must never run on a live PR
+    echo "WARN: pr_state=$PR_STATE at cleanup — refusing destructive actions; treating as PARKED"
+    write_parked_manifest
+    state_update '.phases.CLEANING.disposition = "PARKED_GUARD"'
+    ;;
 
-    SKIPPED|FAIL)
-      # 12.2.3 Failed/skipped path — drop worktree and branch, no manifest
-      git push origin --delete "$BRANCH" 2>/dev/null || true
-      orca worktree remove "$BRANCH" 2>/dev/null || true
-      [ -n "$KEEP_TERM" ] && orca terminal close --handle "$KEEP_TERM" 2>/dev/null || true
-      record_subtask_state "$SUB" disposition="DROPPED" branch_deleted=true worktree_removed=true
-      ;;
+  *)
+    echo "WARN: unexpected pr_state='$PR_STATE'; no destructive actions taken"
+    ;;
+esac
 
-    *)
-      echo "⚠️  sub-$SUB has unexpected pr_state=$PR_STATE; skipping cleanup"
-      ;;
-  esac
+# ONE history line per workflow — jsonl append (this is NOT the state file)
+echo "{\"workflow_id\":\"$WORKFLOW_ID\",\"feature_slug\":\"$FEATURE_SLUG\",\"branch\":\"$BRANCH\",\"pr_url\":\"$PR_URL\",\"pr_state\":\"$PR_STATE\",\"delivery_mode\":\"$DELIVERY_MODE\",\"timestamp\":\"$(date -Iseconds)\"}" \
+  >> .orca/workflow-history.jsonl
 
-  # Always append a per-sub-task history line
-  cat >> .orca/workflow-history.jsonl << EOF
-{"workflow_id":"$WORKFLOW_ID","subtask_id":"$SUB","branch":"$BRANCH","pr_state":"$PR_STATE","disposition":"${DISPOSITION[$SUB]:-UNKNOWN}","timestamp":"$(date -Iseconds)"}
-EOF
-done
-
-# Workflow-level: switch back to main + summary
-git checkout main
-git pull
+# Afterwards the coordinator runs ONLY: git fetch origin  (never checkout, never pull --rebase)
+git fetch origin
 ```
 
-### 12.3 Per-Sub-Task Parked Manifest
+### 12.3 Parked Manifest
 
-```bash
-write_parked_manifest() {
-  local sub="$1"
-  mkdir -p .orca/parked
+`.orca/parked/<feature-slug>.md`:
 
-  cat > ".orca/parked/${sub}.md" << PARK_EOF
-# Parked Sub-task: ${SUBTASK_TITLE[$sub]} (sub-${sub})
+```markdown
+# Parked Feature: add-user-prefs
 
-- **Branch**: \`${SUBTASK_BRANCH[$sub]}\`
-- **Worktree path**: \`${SUBTASK_WT[$sub]}\`
-- **Base branch**: \`${SUBTASK_BASE[$sub]}\`
-- **PR**: ${SUBTASK_PR_URL[$sub]:-none}
-- **Parked at**: $(date -Iseconds)
-- **Reason**: ${SUBTASK_PARK_REASON[$sub]:-manual}
-
-## Dependencies
-$(printf -- '- %s\n' "${SUB_DEPS[$sub]}")
-
-## Stacked-Chain Context
-$(if [ "${SUBTASK_BASE[$sub]}" != "main" ]; then
-    echo "This sub-task is stacked on \`${SUBTASK_BASE[$sub]}\`."
-    echo "Resolve the parent first, then rebase this branch onto main."
-  else
-    echo "Independent of other sub-tasks (no parent)."
-  fi)
+- **Branch**: `feature/add-user-prefs`
+- **Worktree path**: `../add-user-prefs`
+- **PR**: https://github.com/org/repo/pull/123 (state: CLOSED)
+- **Parked at**: 2026-07-27T12:15:00Z
+- **Reason**: PR closed without merge
+- **Stacked context**: n/a (v2.2.0 uses a single feature branch — no stacks)
 
 ## Recovery Steps
-1. \`cd "${SUBTASK_WT[$sub]}"\`
-2. \`git fetch origin && git rebase origin/main\`  (or \`git rebase ${SUBTASK_BASE[$sub]}\` if stacked)
-3. Resolve any new conflicts
-4. \`git push --force-with-lease origin "${SUBTASK_BRANCH[$sub]}"\`
-5. If PR was draft: \`gh pr ready "${SUBTASK_PR_URL[$sub]}"\`
-6. Resume the workflow (or rerun Phase 7 for this sub-task only)
+1. `cd ../add-user-prefs`
+2. `git fetch origin main && git rebase origin/main`
+3. Resolve any conflicts, then `git push --force-with-lease origin feature/add-user-prefs`
+4. Reopen the PR (or create a new one) and re-run the integration review (§11.4)
+5. Resume the workflow at Phase 7
 
-## Artifacts
-$(ls -1 "${SUBTASK_WT[$sub]}/artifacts/" 2>/dev/null || echo "(none)")
-PARK_EOF
+## Subtask Verdicts
+- sub-1 (prefs-api): PASS, 1 review round
+- sub-2 (prefs-ui): PASS, 0 review rounds
+```
 
-  echo "sub-${sub} parked → .orca/parked/${sub}.md"
+### 12.4 Atomic State Writes
+
+**Every** update to `.orca/workflow-state.json` goes through jq with an atomic
+tmp-file + `mv`. Never append JSON with `>>` (the `.jsonl` history file above
+is the only exception — it is line-delimited, not a JSON document):
+
+```bash
+state_update() {   # usage: state_update '<jq filter>'
+  local tmp; tmp=$(mktemp .workflow-state.XXXXXX)
+  jq "$1" "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
 }
 ```
 
-### 12.4 User Notification
+### 12.5 User Notification
 
 ```bash
-DELIVERY_REPORT=$(generate_delivery_report)
-
-orca orchestration ask \
-  --to coordinator \
-  --question "🎉 Workflow complete!
-
-${DELIVERY_REPORT}
-
-Each sub-task has its own merged PR or a per-sub-task parked manifest in
-\`./.orca/parked/\`. Artifacts are in each sub-task's worktree (already
-cleaned up) or in \`./.orca/parked/<sub>.md\` for parked sub-tasks." \
-  --timeout-ms 0
+# Via the coordinator's NATIVE channel:
+echo "🎉 Workflow complete — $DELIVERY_REPORT"
+# MERGED: PR url + summary of what shipped
+# PARKED: pointer to .orca/parked/<feature-slug>.md with recovery steps
 ```
 
-### 12.5 Output
+### 12.6 Output
 
 ```json
 {
   "phase": "CLEANING",
   "status": "complete",
-  "subtasks": [
-    {"id":"sub-1","disposition":"MERGED","branch_deleted":true,"worktree_removed":true},
-    {"id":"sub-2","disposition":"MERGED","branch_deleted":true,"worktree_removed":true}
-  ],
-  "parked_subtasks": [],
+  "disposition": "MERGED",
+  "branch_deleted": true,
+  "worktree_removed": true,
+  "parked_manifest": null,
   "timestamp": "2026-07-27T12:15:00Z"
 }
 ```
@@ -1612,58 +1503,104 @@ cleaned up) or in \`./.orca/parked/<sub>.md\` for parked sub-tasks." \
 
 ### 13.1 Workflow State File
 
-A single JSON file at `.orca/workflow-state.json` tracks the entire run:
+A single JSON file at `.orca/workflow-state.json` tracks the entire run. All
+writes are jq atomic writes (§12.4). v2.1.0's aggregate `branch`/`pr_url`
+compat fields are dropped; `current_phase`/`current_state` enums now include
+`INIT`; `pr.state ∈ {OPEN, CHANGES_REQUESTED, MERGED, CLOSED, PARKED, null}`
+(no DRAFT — v2.2.0 never creates draft PRs).
 
 ```json
 {
-  "workflow_id": "wf_20260726_001",
-  "version": "2.0.0",
-  "started_at": "2026-07-26T10:00:00Z",
+  "workflow_id": "wf_20260727_001",
+  "version": "2.2.0",
+  "started_at": "2026-07-27T10:00:00Z",
   "current_phase": "EXECUTING",
   "current_state": "EXECUTING",
+  "termination_reason": null,
+  "delivery_mode": null,
+  "feature_slug": "add-user-prefs",
+  "worktree": {
+    "id": "wt_abc123",
+    "path": "../add-user-prefs",
+    "branch_name": "feature/add-user-prefs",
+    "base_branch": "origin/main"
+  },
+  "pr": {
+    "url": null,
+    "state": null,
+    "merged_at": null
+  },
   "phases": {
-    "GATHERING": {
-      "status": "complete",
-      "entered_at": "2026-07-26T10:00:00Z",
-      "exited_at": "2026-07-26T10:05:00Z",
-      "clarification_rounds": 2
-    }
+    "GATHERING": {"status": "complete", "entered_at": "2026-07-27T10:00:00Z", "exited_at": "2026-07-27T10:05:00Z", "clarification_rounds": 2},
+    "PLANNING": {"status": "complete", "entered_at": "2026-07-27T10:05:00Z", "exited_at": "2026-07-27T10:15:00Z", "review_rounds": 2, "escalate_count": 0},
+    "CONFIRMING": {"status": "complete", "entered_at": "2026-07-27T10:15:00Z", "exited_at": "2026-07-27T10:20:00Z", "user_decision": "APPROVE"},
+    "DISPATCHING": {"status": "complete", "entered_at": "2026-07-27T10:20:00Z", "exited_at": "2026-07-27T10:30:00Z", "waves": [["sub-1", "sub-2"], ["sub-3"]]},
+    "EXECUTING": {"status": "in_progress", "entered_at": "2026-07-27T10:30:00Z", "current_wave": 0},
+    "DECIDING": {"status": "pending"},
+    "MERGING": {"status": "pending"},
+    "CLEANING": {"status": "pending"}
   },
   "tasks": {
     "plan": {"id": "task_xxx", "status": "completed", "verdict": "PASS"},
     "subtasks": [
-      {"id": "task_yyy", "status": "completed", "verdict": "PASS", "artifact": "..."},
-      {"id": "task_zzz", "status": "completed", "verdict": "FAIL", "reason": "..."}
+      {
+        "id": "task_yyy",
+        "logical_id": "sub-1",
+        "title": "Preferences API",
+        "complexity": "general",
+        "deps": [],
+        "owns": ["src/prefs/**", "docs/prefs.md"],
+        "status": "completed",
+        "verdict": "PASS",
+        "reason": null,
+        "base_sha": "a1b2c3d",
+        "initial_base_sha": "a1b2c3d",
+        "review_rounds": 1,
+        "terminals": [
+          {"handle": "term_yyy", "role": "execution", "round": 0, "agent_type": "claude", "status": "completed", "verdict": "PASS", "spawned_at": "2026-07-27T10:30:00Z", "closed_at": null},
+          {"handle": "term_rrr", "role": "review", "round": 0, "agent_type": "pi", "status": "closed", "verdict": "FAIL", "spawned_at": "2026-07-27T10:45:00Z", "closed_at": "2026-07-27T10:52:00Z"},
+          {"handle": "term_zzz", "role": "fix", "round": 1, "agent_type": "claude", "status": "completed", "verdict": "PASS", "spawned_at": "2026-07-27T10:52:00Z", "closed_at": null},
+          {"handle": "term_sss", "role": "review", "round": 1, "agent_type": "pi", "status": "closed", "verdict": "PASS", "spawned_at": "2026-07-27T11:05:00Z", "closed_at": "2026-07-27T11:12:00Z"}
+        ],
+        "keep_terminal": "term_zzz"
+      }
     ]
   },
+  "integration_review": {"rounds": 0, "verdict": null},
   "decisions": [
-    {"gate": "plan_review", "result": "PASS", "round": 2, "timestamp": "..."},
-    {"gate": "sub_failure_decision", "decision": "DEGRADE", "timestamp": "..."}
+    {"phase": "PLANNING", "kind": "plan_review", "result": "PASS", "round": 2, "timestamp": "2026-07-27T10:15:00Z"},
+    {"phase": "CONFIRMING", "kind": "user_confirmation", "result": "APPROVE", "timestamp": "2026-07-27T10:20:00Z"}
   ],
-  "delivery_mode": "full",
-  "termination_reason": null
+  "retry_counts": {"global_retries_used": 0},
+  "errors": []
 }
 ```
+
+Terminal `role` enum: `execution` | `review` | `fix` | `fallback` | `autofix` |
+`pr-fix` | `integration-review`.
 
 ### 13.2 Log Levels
 
 | Level | When to Use |
 |-------|------------|
-| `DEBUG` | Every gate creation, task dispatch, poll iteration |
-| `INFO` | Phase transitions, decisions, normal progress |
-| `WARN` | Retries triggered, clarifications needed, timeouts |
-| `ERROR` | Task failures, conflict detection, escalate triggers |
+| `DEBUG` | Every task creation, dispatch, poll iteration, `check --wait` timeout checkpoint |
+| `INFO` | Phase transitions, wave dispatch, decisions, normal progress |
+| `WARN` | Retries triggered, clarifications needed, owns violations reverted, timeouts |
+| `ERROR` | Task failures, conflict detection, integration-review FAIL, escalate triggers |
 | `FATAL` | Orca connectivity loss, unrecoverable state corruption |
 
 ### 13.3 Key Metrics to Track
 
 - `workflow.total_duration_ms`
 - `workflow.phase_duration_ms{phase="PLANNING"}`
-- `workflow.review_rounds_total`
+- `workflow.review_rounds_total` (per-subtask cross-review rounds)
+- `workflow.integration_review_rounds_total` (NEW in v2.2.0)
 - `workflow.escalation_count_total`
 - `workflow.subtask_pass_rate`
 - `workflow.global_retries_used`
 - `workflow.delivery_mode{full|degraded}`
+
+(Stacked-PR metrics from v2.1.0 are dropped — there are no stacked PRs.)
 
 ---
 
@@ -1672,48 +1609,75 @@ A single JSON file at `.orca/workflow-state.json` tracks the entire run:
 | Failure Scenario | Detection | Automatic Recovery | Manual Recovery |
 |-----------------|-----------|-------------------|-----------------|
 | Orca becomes unreachable | `orca status` fails | Retry 3x with 5s backoff | Restart Orca, reload state from `.orca/workflow-state.json` |
-| Worker terminal dies mid-execution | Task stuck in `dispatched` > timeout | Re-dispatch to a new worker with context from state file | `orca terminal create --type worker` |
-| Plan review loops indefinitely | `review_round >= MAX_REVIEW_ROUNDS` | Escalate to human (up to 2x) | Human provides direction or terminates |
-| Subtask times out | Wall clock > `timeout_ms` | Mark as FAIL, let Phase 6 decide | Increase timeout, re-dispatch |
-| Git rebase produces unresolvable conflicts | `git rebase` exits non-zero after auto-fix attempts | Escalate to human with conflict details | Human resolves manually or parks |
-| PR CI fails | `gh pr view` shows `mergeStateStatus: BLOCKED` | Coordinator reads CI logs and attempts fix | Human investigates CI failure |
-| User abandons (no response to `ask`) | `ask` timeout + follow-up timeout | Persist state, exit cleanly | Resume from saved state when user returns |
-| Disk full during artifact write | Worker reports write error | Mark subtask FAIL | Free disk space, re-dispatch |
+| Task circuit breaker (3 consecutive failures on one task) | dispatch/check errors referencing the same task id | **Never re-dispatch the same task** — create a NEW task chained with `--parent` and dispatch it to a fresh terminal | Inspect why the task keeps failing before creating the next one |
+| Lost `worker_done` (worker finished but the event never arrived) | `check --wait` timeout with the task still `dispatched` | Timeout = checkpoint: inspect `task-list` and read the terminal for liveness; if the worker is idle/done, collect its result from `task-list` and mark the task completed | If the terminal is truly dead, close it and dispatch a NEW task to a fresh terminal |
+| **owns violation** (worker wrote outside its `owns`) | Coordinator `git status --porcelain` / `git diff` check after each round shows paths outside the subtask's `owns` globs | Coordinator reverts the offending files (`git checkout -- <paths>`; `git clean -fd <paths>` for untracked), records an error, counts the round as FAIL with feedback | Persistent violations → fail the subtask, let Phase 6 decide |
+| Plan review loops indefinitely | `review_round >= MAX_REVIEW_ROUNDS` | Escalate to the user (native channel, up to 2x) | User provides direction or terminates |
+| Subtask wall-clock timeout | Elapsed > `timeout_ms` | `task-update --status failed` + `orca terminal close`; Phase 6 decides | Increase timeout, retry the subtask |
+| Rebase produces unresolvable conflicts | Non-zero rebase after ≤2 autofix rounds | Escalate to the user with conflict details | User resolves manually or the feature is PARKED |
+| Integration review never passes | `rounds >= MAX_INTEGRATION_REVIEW` with FAIL | Escalate to the user | Release anyway (verdict recorded in PR body) or PARK |
+| `gh pr create` fails | Non-zero exit code (always checked) | Log, retry once | User creates the PR manually |
+| PR CI blocked | `gh pr view` shows `mergeStateStatus: BLOCKED` | Fresh fix terminal reads the failure and pushes a fix | User investigates the CI failure |
+| User abandons (no response on the native channel) | Response timeout | Persist state, exit cleanly | Resume from saved state when the user returns |
+| Disk full during artifact write | Worker reports write error | Mark subtask FAIL | Free disk space, retry |
 
 ---
 
 ## 15. Security & Permission Model
 
-### 15.1 Boundaries
+### 15.1 Honest Isolation Model
+
+**A git worktree is not a sandbox.** In v2.2.0 all subtasks share one feature
+worktree, so any worker terminal can *technically* write anywhere in it.
+Isolation is an **`owns` convention enforced by the coordinator**, not by the
+filesystem:
+
+1. Every worker preamble restricts writes to the subtask's `owns` globs (§8.5).
+2. After **each round**, the coordinator runs `git status --porcelain` /
+   `git diff --name-only <base_sha>..HEAD` in the feature worktree and maps
+   changed paths against the subtask's `owns`. Anything outside is reverted
+   (`git checkout -- <paths>` / `git clean -fd <paths>`) and recorded as an
+   owns violation (§14).
+3. Review and integration-review terminals are read-only **by preamble
+   mandate**; the coordinator additionally verifies they produced no diff
+   outside `owns` (for subtask reviews) or no diff at all (for reviews).
+
+### 15.2 Boundaries
 
 | Operation | Permission Required | Agent Capability |
 |-----------|-------------------|-----------------|
-| Read files in **own sub-task's worktree** | File system access (default) | Execution / fix / review terminals |
-| Write files in **own sub-task's worktree** | File system access (default) | Execution / fix terminals only (review is read-only) |
-| Write files in **another sub-task's worktree** | **DENIED** by design — worktrees are isolated by `git worktree` mechanism | No agent |
-| `git push` to remote (own branch) | Git credentials configured | Coordinator only (Phase 7, 11.8 stacked-PR hook) |
-| `git push --delete` (own branch) | Force-push permission on branch | Coordinator only (Phase 8) |
-| `git push --force-with-lease` (stacked rebase) | Same as above | Coordinator only (§11.8 stacked-PR hook) |
-| `gh pr create` (per-sub-task, base = parent branch or main) | GitHub token with `repo` scope | Coordinator only (Phase 7) |
-| `gh pr edit --base main` | Same as above | Coordinator only (§11.8) |
-| `gh pr ready` (promote from draft) | Same as above | Coordinator only (§11.8) |
+| Read files in the feature worktree | File system access (default) | All worker terminals |
+| Write files inside own `owns` globs | File system access (default) | Execution / fix / fallback / pr-fix terminals |
+| Write files outside own `owns` globs | Convention — **reverted by the coordinator** after each round | No agent (enforced via §15.1) |
+| Commit on the feature branch | Git credentials (local) | Execution / fix / fallback / autofix / pr-fix terminals (small commits) |
+| Review diff `<base_sha>..HEAD` | Read-only | Review / integration-review terminals |
+| `git push` (feature branch) | Git credentials configured | Coordinator only (Phase 7, §11.6) |
+| `git push --delete` (feature branch) | Branch delete permission | Coordinator only (Phase 8) |
+| `gh pr create` | GitHub token with `repo` scope | Coordinator only (Phase 7) |
 | `gh pr merge` | Write access to target branch | **Human only — never automated** |
-| `orca orchestration dispatch` | Orca runtime access | Coordinator only |
-| `orca orchestration gate-resolve` | Orca runtime access | Designated reviewer agents |
-| `orca worktree create` | Orca runtime access | Coordinator only (Phase 4 — once per sub-task) |
-| `orca worktree remove` | Orca runtime access | Coordinator only (Phase 8 — once per sub-task, reverse-topo) |
-| `orca terminal create` | Orca runtime access | Coordinator only (Phase 4 + Phase 5 + Phase 11.4 autofix + Phase 11.6 pr-feedback) |
-| `orca terminal close` | Orca runtime access | Coordinator only (Phase 5 round end + Phase 8 keep_terminal teardown) |
+| `orca orchestration dispatch` / `task-create` / `task-update` | Orca runtime access | Coordinator only |
+| `orca orchestration ask --to <coordinator>` | Orca runtime access | **Workers → coordinator only**; the coordinator asks the USER via its native channel |
+| `orca worktree create` / `orca worktree rm` | Orca runtime access | Coordinator only (Phase 4 / Phase 8 — once per feature) |
+| `orca terminal create` / `orca terminal close` | Orca runtime access | Coordinator only (every round, every role) |
 
-### 15.2 Principles
+### 15.3 Principles
 
-1. **Per-Sub-Task Isolation**: Each sub-task owns a dedicated worktree created via `git worktree`. The git worktree mechanism prevents any terminal from writing outside its sub-task's working directory — even if the Agent misbehaves.
-2. **Per-Round Agent Isolation**: Review terminals are read-only by tag convention (`review` tag → no `--write` flag in `orca terminal create` command). Fix terminals are write-enabled only inside their sub-task's worktree.
-3. **Least Privilege**: Workers (terminals) can only read/write within their sub-task's worktree; they cannot merge, delete branches, create PRs, or push. All those operations are coordinator-only.
-4. **No Automated Merge**: The workflow NEVER auto-merges a PR. Human approval is always required — even on sub-task PRs.
-5. **Stacked-Branch Auto-Rebase is Coordinator-Only**: The §11.8 stacked-PR rebase hook runs in the coordinator's terminal, never inside a sub-task's worker.
-6. **Immutable Audit Trail**: All decisions, terminal spawns, and state transitions are written to `.orca/workflow-state.json` before being acted upon. `tasks.subtasks[*].terminals[]` provides a per-round audit trail.
-7. **Secret Isolation**: GitHub tokens and API keys are read from environment/credential store, never hardcoded in task specs.
+1. **Coordinator-Enforced Ownership**: `owns` is a convention; the enforcement
+   is the coordinator's post-round verification + revert loop (§15.1), not the
+   filesystem. Plan-review disjointness validation (§6.3) keeps same-wave
+   workers from legitimately needing the same paths.
+2. **Least Privilege**: Workers can commit locally but cannot push, merge,
+   delete branches, or create PRs. All of those are coordinator-only.
+3. **No Automated Merge**: The workflow NEVER merges a PR. Human approval is
+   always required.
+4. **Single Push Path**: Pushes happen only from the coordinator in Phase 7
+   (initial PR + pr-fix follow-ups); subtask workers never push.
+5. **Immutable Audit Trail**: All decisions, terminal spawns, and state
+   transitions are written to `.orca/workflow-state.json` (jq atomic writes)
+   before being acted upon; `tasks.subtasks[*].terminals[]` is the per-round
+   audit trail.
+6. **Secret Isolation**: GitHub tokens and API keys come from the environment /
+   credential store — never hardcoded in task specs, preambles, or the PR body.
 
 ---
 
@@ -1727,57 +1691,52 @@ Set `ORCA_WORKFLOW_DRY_RUN=true` to simulate without side effects:
 export ORCA_WORKFLOW_DRY_RUN=true
 ```
 
-In dry-run mode:
-- `task-create` prints the spec but does not create tasks
-- `dispatch` prints the preamble but does not inject
-- `gh pr create` prints the PR body but does not push
-- `git push` is replaced with `git push --dry-run`
+In dry-run mode the coordinator **prints every action and skips every
+mutation** — no `worktree create`, no `terminal create`, no `task-create` /
+`dispatch`, no `git push`, no `gh pr create` — **but it still writes the state
+file** with `"dry_run": true` at the top level. State writes are intentional:
+they let tests assert on the phase structure (§16.3) without any real side
+effects.
 
 ### 16.2 Phase Validation Checklist
 
 After each phase, validate:
 
 - [ ] **Phase 1**: Clarified requirement is non-empty and has ≥ 3 concrete details
-- [ ] **Phase 2**: Plan artifact exists, review verdict is PASS
+- [ ] **Phase 2**: Plan artifact (text) captured, review verdict PASS via `worker_done`, owns-disjointness validated
 - [ ] **Phase 3**: User confirmation recorded with timestamp
-- [ ] **Phase 4**: All subtasks created, deps form a valid DAG (no cycles)
-- [ ] **Phase 5**: All workers reported done (completed or failed)
-- [ ] **Phase 6**: Decision recorded (retry/degrade/escalate)
-- [ ] **Phase 7**: PR URL is valid, git state is clean
-- [ ] **Phase 8**: Worktree removed or park manifest created
+- [ ] **Phase 4**: Exactly one worktree recorded in state; subtask deps form a valid DAG; same-wave `owns` disjoint; wave 0 dispatched
+- [ ] **Phase 5**: All dispatched subtasks have verdicts; no writes outside `owns` remain unreverted
+- [ ] **Phase 6**: Decision recorded (retry/degrade/abort); `global_retries_used ≤ 2`
+- [ ] **Phase 7**: Rebase clean (zero `^UU`), tests recorded, integration-review verdict recorded, PR URL valid
+- [ ] **Phase 8**: Worktree removed or parked manifest created; exactly one history line appended
 
 ### 16.3 Integration Test Scenario
 
 ```bash
-# Test the full workflow with a trivial task
+# Test the full workflow with a trivial task, in dry-run mode
 export ORCA_WORKFLOW_DRY_RUN=true
-export ORCA_WORKFLOW_STRICT_PREREQ=false   # allow solo runs in CI
+export ORCA_WORKFLOW_STRICT_PREREQ=false   # allow WARN-only prerequisite checks in CI
 
-# Write the spec to a temp file (any markdown describing the task)
-cat > /tmp/spec.md <<'EOF'
-# Hello-World Smoke Test
+cd /path/to/project          # an Orca-managed checkout on main
+./scripts/check-prerequisites.sh
 
-## Goal
-Write a hello-world script in Python that prints "Hello, World!".
+# Describe the task to the coordinator agent in chat (NOT `orca orchestration run`):
+#
+#   "Dry-run smoke test: write a hello-world script hello.py that prints
+#    'Hello, World!'. Python 3.10+, no external dependencies, no tests
+#    required. Acceptance: `python hello.py` exits 0 with stdout 'Hello, World!'."
+#
+# The coordinator walks all 8 phases, printing the actions it WOULD take
+# (worktree create, terminal spawns, dispatches, PR creation) and performing
+# none of them — except the state file.
 
-## Scope
-- Single file `hello.py`
-- No tests required (smoke test only)
+# Verify the state file was written with the full phase structure
+jq -r '.dry_run' .orca/workflow-state.json
+# Expected: true
 
-## Constraints
-- Python 3.10+
-- No external dependencies
-
-## Acceptance Criteria
-- `python hello.py` exits 0 with stdout "Hello, World!"
-EOF
-
-# Start the coordinator with the spec file
-orca orchestration run --spec /tmp/spec.md
-
-# Verify state file was written correctly
 jq '.phases | keys' .orca/workflow-state.json
-# Expected: ["GATHERING","PLANNING","CONFIRMING","DISPATCHING","EXECUTING","DECIDING","MERGING","CLEANING"]
+# Expected: ["CLEANING","CONFIRMING","DECIDING","DISPATCHING","EXECUTING","GATHERING","MERGING","PLANNING"]
 ```
 
 ---
@@ -1787,27 +1746,20 @@ jq '.phases | keys' .orca/workflow-state.json
 ### 17.1 Starting a New Workflow
 
 ```bash
-# 1. Navigate to the project worktree
+# 1. Navigate to the project's MAIN checkout (the coordinator never leaves main)
 cd /path/to/project
 
 # 2. Verify prerequisites
 ./scripts/check-prerequisites.sh
 
-# 3. Write the spec to a markdown file
-cat > /tmp/task.md <<'EOF'
-# <Title>
-## Goal
-...
-## Scope
-...
-## Acceptance Criteria
-...
-EOF
-
-# 4. Start the coordinator with the spec file
-orca orchestration run --spec /tmp/task.md
-
-# The coordinator will prompt for any clarifications via Phase 1
+# 3. Describe the task to the coordinator agent in chat, e.g.:
+#    "Implement user preferences: a REST API for reading/updating prefs and a
+#     settings page that consumes it. Acceptance: …"
+#
+#    Do NOT use `orca orchestration run --spec <file>` — that is Orca's native
+#    single-agent runner, not this workflow (§18.1).
+#
+# The coordinator takes over from Phase 1 and prompts you for clarifications.
 ```
 
 ### 17.2 Resuming a Parked Workflow
@@ -1816,40 +1768,43 @@ orca orchestration run --spec /tmp/task.md
 # 1. Find the parked manifest
 ls .orca/parked/
 
-# 2. Read recovery instructions
-cat .orca/parked/feature-my-task-20260726.md
+# 2. Read the recovery instructions
+cat .orca/parked/add-user-prefs.md
 
-# 3. Follow the recovery steps in the manifest
-cd /path/to/parked/worktree
-git rebase origin/main
+# 3. Follow them — typically:
+cd ../add-user-prefs            # the KEPT feature worktree
+git fetch origin main && git rebase origin/main
+# resolve conflicts if any
+git push --force-with-lease origin feature/add-user-prefs
 
-# 4. Re-enter the workflow at Phase 7
-orca orchestration gate-create \
-  --task "$PR_TASK_ID" \
-  --question "Resume parked PR review" \
-  ...
+# 4. Tell the coordinator (chat) to resume the workflow at Phase 7:
+#    it re-runs the integration review (§11.4) and PR monitoring (§11.6)
 ```
 
 ### 17.3 Recovering from a Crash
 
 ```bash
 # 1. Load the saved state
-STATE=$(cat .orca/workflow-state.json)
-CURRENT_PHASE=$(echo "$STATE" | jq -r '.current_phase')
+CURRENT_PHASE=$(jq -r '.current_phase' .orca/workflow-state.json)
 
-# 2. Determine recovery action
+# 2. Determine the recovery action by phase
 case "$CURRENT_PHASE" in
-  "GATHERING"|"PLANNING"|"CONFIRMING")
-    echo "Early phase — restart from beginning is safe."
-    # Reset and start over
+  "INIT"|"GATHERING"|"PLANNING"|"CONFIRMING")
+    echo "Early phase — restarting from the beginning is safe."
     ;;
   "DISPATCHING"|"EXECUTING")
-    echo "Mid phase — check which tasks need re-dispatch."
-    # Query task-list for incomplete tasks and re-dispatch
+    echo "Mid-flight — reuse the feature worktree if it exists, re-dispatch stragglers."
+    # Worktree existence/resume check (matched by name):
+    orca worktree list --json | jq -r --arg n "$FEATURE_SLUG" \
+      '.result.worktrees[]? | select(.name == $n) | .id'
+    # In-flight tasks:
+    orca orchestration task-list --json | jq '.result.tasks[] | select(.status == "dispatched")'
+    # Subtasks without a verdict → re-dispatch as NEW tasks (never reuse a
+    # failed task id) on FRESH terminals, per §8.3.3.
     ;;
   "DECIDING"|"MERGING"|"CLEANING")
-    echo "Late phase — resume from saved decision state."
-    # Continue from the last decision point
+    echo "Late phase — resume from the recorded decision / pr.state."
+    jq '.pr' .orca/workflow-state.json
     ;;
 esac
 ```
@@ -1857,65 +1812,78 @@ esac
 ### 17.4 Cancelling a Running Workflow
 
 ```bash
-# Graceful cancellation
-orca orchestration run-stop
-
-# Mark all in-flight tasks as failed
+# 1. Mark all in-flight tasks as failed
 for TASK_ID in $(orca orchestration task-list --json | jq -r '.result.tasks[] | select(.status == "dispatched") | .id'); do
   orca orchestration task-update --id "$TASK_ID" --status "failed" \
     --result '{"verdict":"FAIL","reason":"Workflow cancelled by user"}'
 done
 
-# Persist state
-echo '{"status":"CANCELLED","cancelled_at":"'$(date -Iseconds)'"}' >> .orca/workflow-state.json
+# 2. Persist the cancellation with a jq ATOMIC WRITE — never append JSON with >>
+TMP=$(mktemp .workflow-state.XXXXXX)
+jq --arg ts "$(date -Iseconds)" \
+  '.current_state = "TERMINATED" | .termination_reason = "cancelled by user" | .terminated_at = $ts' \
+  .orca/workflow-state.json > "$TMP" && mv "$TMP" .orca/workflow-state.json
+
+# 3. Close any remaining workflow terminals
+orca terminal list --json | jq -r '.result.terminals[].handle' | while read -r H; do
+  orca terminal close --terminal "$H" --json 2>/dev/null || true
+done
 ```
 
 ---
 
 ## 18. API Command Reference
 
+This is the **verified** Orca CLI surface on this machine — flags not listed
+here do not exist. In particular: `orca terminal create` has **no `--tags`**,
+`orca terminal close` uses **`--terminal`** (not `--handle`), `orca worktree
+create` takes **no positional path arg and no `--base`**, `orca orchestration
+dispatch` has **no `--spec`**, and `orca worktree remove` does not exist (use
+`orca worktree rm`).
+
 ### 18.1 `orca orchestration` Commands Used
 
 | Command | Phase(s) | Purpose |
 |---------|----------|---------|
-| `task-create` | 2, 4 | Create plan tasks and per-sub-task tasks |
-| `task-list` | 5, 6 | Poll per-sub-task statuses |
-| `task-update` | 2, 5, 6 | Update per-sub-task status/results |
-| `dispatch` | 2, 4, 5, 6, 11.4, 11.6 | Send task spec to a (freshly spawned) worker terminal |
-| `gate-create` | 2, 6, 7 (per-sub-task) | Create a blocking decision gate (plan review, sub-task PR review, merge-conflict escalation) |
-| `gate-resolve` | 2, 6, 7 | Resolve a pending gate |
-| `ask` | 1, 2, 3, 6, 7, 8 | Blocking question to coordinator (human) |
-| `run --spec <file>` | All | Start the coordinator event loop with a markdown spec |
-| `run-stop` | Recovery | Gracefully stop a running workflow |
-| `reset` | Recovery | Reset orchestration state |
+| `task-create --spec <text> [--task-title] [--display-name] [--deps <json_array>] [--parent <task_id>] --json` | 2, 4, 5, 7 | Create plan/review/subtask/fix/autofix/integration-review tasks; `--parent` chains rounds |
+| `dispatch --task <id> --to <handle> [--inject] --json` | 2, 4, 5, 7 | Send a task to a fresh terminal. **No `--spec`** — new instructions require a NEW task |
+| `check --wait --types worker_done,escalation,decision_gate --timeout-ms <n> --json` | 2, 5, 7 | Block for worker events; timeout = checkpoint, keep rolling (long tasks take 15–60 min) |
+| `task-list [--status] [--ready] --json` | 5, 6, recovery | Poll statuses; liveness check after `check` timeouts; find stragglers |
+| `task-update --id <id> --status <pending\|ready\|dispatched\|completed\|failed\|blocked> [--result <json>]` | 5, 6, recovery | Mark timeouts/cancellations; record results |
+| `gate-create --task <id> --question <text> [--options <json_array>]` | coordinator-managed DAG decisions ONLY | Every gate must name who resolves it. **Never** for agent reviews (use a review task + `worker_done`); **never** inside the PR poll loop |
+| `ask --to <coordinator_handle>` | worker → coordinator ONLY | Workers escalate to the coordinator. The coordinator asks the USER via its **native** channel |
+| `run --spec <text>` | — | Orca's **native single-agent runner** — listed for completeness; this workflow is started by describing the task to the coordinator in chat (§17.1) |
 
 ### 18.2 `orca worktree` Commands Used
 
 | Command | Phase(s) | Purpose |
 |---------|----------|---------|
-| `worktree list` | 4 | Check existing worktrees (now: per-sub-task entries) |
-| `worktree create` | 4 | **Once per sub-task** — create the isolated worktree for that sub-task's branch |
-| `worktree remove` | 8 | **Once per sub-task** — delete worktree after merge, reverse-topo order |
+| `worktree current --json` → `.result.worktree.id` | 3 | Prereq: coordinator must be inside an Orca-managed checkout |
+| `worktree list --json` | 4, recovery | Existence/resume check, matched by name |
+| `worktree create --name "<slug>" --base-branch origin/main --json` | 4 | Create the ONE feature worktree (branch `feature/<slug>`). Read id/path from the JSON result — exact field names should be confirmed on first live run |
+| `worktree rm --worktree id:<id> --force --json` | 8 | Remove the feature worktree after merge |
 
-### 18.3 `orca terminal` Commands Used (v2.1.0)
+### 18.3 `orca terminal` Commands Used
 
 | Command | Phase(s) | Purpose |
 |---------|----------|---------|
-| `terminal list` | 4, 5, 8 | Inspect terminal pool + tag matching |
-| `terminal create` | 4, 5, 7, 8 | **Spawn a fresh terminal** for execution / review / fix / autofix / pr-feedback — never reuse across rounds |
-| `terminal close` | 5, 8 | Tear down intermediate terminals (review) after each round; close keep_terminal in Phase 8 |
+| `terminal list --json` → `.result.terminals[]` fields: `handle,title,worktreeId,worktreePath,branch,connected,writable,…` | 5, 8, recovery | Liveness inspection; no `type`/`tags` fields exist |
+| `terminal create --worktree id:<id> --title "[<role>:<agent>] …" --command "<agent cli>" --json` | 2, 4, 5, 7 | Spawn a FRESH terminal for every round of every role. Selectors: `id:`/`name:`/`path:`/`branch:`/`active`. No `--tags` |
+| `terminal close --terminal <handle> --json` | 5, 7, 8 | Tear down review terminals after each round; close keep_terminal(s) in Phase 8. Uses `--terminal`, not `--handle` |
 
 ### 18.4 External Commands Used
 
 | Command | Phase(s) | Purpose |
 |---------|----------|---------|
-| `git fetch/push/rebase/push --force-with-lease` | 7, 11.8 | Per-sub-task branch management + stacked-PR rebase hook |
-| `git diff --stat` | 7 | Per-sub-task change summary |
-| `gh pr create` | 7 | Per-sub-task PR — `--base parent_branch` if stacked, `--draft` if dependent |
-| `gh pr edit --base main` | 11.8 | Flip PR base after parent merges |
-| `gh pr ready` | 11.8 | Promote a draft PR (parent just merged) |
-| `gh pr view` | 7 | Per-sub-task PR lifecycle monitoring |
-| `jq` | All | JSON parsing |
+| `git fetch origin` (optionally `git pull --ff-only`) | 3, 4, 8 | The coordinator's ONLY git ops in its own checkout — it never runs `git checkout` |
+| `(cd <wt> && git fetch origin main && git rebase origin/main)` | 7 | Rebase the feature branch inside the worktree |
+| `(cd <wt> && git status --porcelain / git diff --name-only <base_sha>..HEAD)` | 5 | Post-round owns verification |
+| `(cd <wt> && git revert --no-commit <range>)` | 6 | Degrade: revert a failed subtask's commit range |
+| `(cd <wt> && git push …)` | 7 | Push the feature branch (coordinator only) |
+| `git push origin --delete <branch>` | 8 | Delete the merged feature branch |
+| `gh pr create --base main --head <branch> --title … --body …` | 7 | Create the ONE feature PR — **always check the exit code** |
+| `gh pr view --json state,mergeStateStatus` | 7 | PR lifecycle monitoring, 60s polling |
+| `jq` (tmp file + `mv`) | all | Atomic state-file writes |
 
 ---
 
@@ -1933,4 +1901,7 @@ See [`.orca/workflow-state.schema.json`](./.orca/workflow-state.schema.json) for
 
 ---
 
-> **Next Steps**: Write your task to a markdown spec file and run `orca orchestration run --spec /path/to/spec.md` in any Orca-managed worktree. The coordinator will guide you through each phase. For first-time setup, see [Prerequisites](#3-prerequisites--environment).
+> **Next Steps**: `cd` into your project's Orca-managed main checkout, run
+> `./scripts/check-prerequisites.sh`, then describe your task to the
+> coordinator agent in chat. The coordinator will guide you through each phase.
+> For first-time setup, see [Prerequisites](#3-prerequisites--environment).
