@@ -1234,161 +1234,187 @@ When `DEGRADE_DELIVER` is chosen:
 
 ---
 
-## 11. Phase 7 — Merge & Pull Request
+## 11. Phase 7 — Merge & Pull Request (per-subtask, stacked)
 
-**Goal**: Generate a change summary, check for conflicts, create a PR, and guide it to completion.
+**Goal**: For **each** sub-task, rebase onto its resolved base, create a PR, and guide it through review → merge. Dependent sub-tasks target their parent's branch as a draft until the parent merges; then the stacked-PR rebase hook (§11.8) flips the base to `main` and promotes the PR.
 
 ### 11.1 Entry Condition
 
 - State: `MERGING`
-- All artifacts ready (full or degraded)
+- Each sub-task in `tasks.subtasks[]` has `verdict=PASS` (or `DEGRADE_DELIVER` was chosen in Phase 6)
+- `branch_strategy.rebase_on_parent_merge` from config (default `true`)
 
-### 11.2 Change Summary Generation
+### 11.2 Process — per-sub-task PR creation in topological order
 
-The coordinator generates a structured PR body:
+```bash
+for SUB in "${TOPO_IDS[@]}"; do   # topological: deps-less first, then dependents
+  BRANCH="${SUBTASK_BRANCH[$SUB]}"
+  WT="${SUBTASK_WT[$SUB]}"
+  BASE="${SUBTASK_BASE[$SUB]}"
+  PR_BASE="$BASE"
+
+  # 11.2.1 Skip sub-tasks whose verdict is FAIL/PARKED
+  if [ "${SUBTASK_VERDICT[$SUB]}" != "PASS" ]; then
+    record_subtask_state "$SUB" pr_state="SKIPPED"
+    continue
+  fi
+
+  # 11.2.2 Rebase onto resolved base (auto-fix loop)
+  autofix_count=0
+  while [ $autofix_count -lt $MAX_AUTOFIX ]; do
+    ( cd "$WT" && git fetch origin "$BASE" && git rebase "$BASE" ) && break
+    autofix_count=$((autofix_count + 1))
+    CONFLICT_FILES=$(cd "$WT" && git diff --name-only --diff-filter=U)
+    echo "⚠️  sub-$SUB conflict (attempt $autofix_count/$MAX_AUTOFIX): $CONFLICT_FILES"
+    auto_resolve_conflicts_in_wt "$WT" "$CONFLICT_FILES" || break
+  done
+
+  if [ $autofix_count -ge $MAX_AUTOFIX ]; then
+    # 11.2.3 Escalate: per-subtask parking
+    orca orchestration ask \
+      --to coordinator \
+      --question "⚠️ sub-$SUB: merge conflicts unresolvable after $MAX_AUTOFIX attempts.\nFiles: $CONFLICT_FILES\nResolve or park this sub-task only?" \
+      --options "Resolved — continue,Park — keep sub-task for later"
+    # If park: write .orca/parked/<sub>.md and skip to next sub-task
+    park_subtask "$SUB"
+    continue
+  fi
+
+  # 11.2.4 Push branch
+  ( cd "$WT" && git push -u origin "$BRANCH" ) || { park_subtask "$SUB" "push-failed"; continue; }
+
+  # 11.2.5 Create PR — draft if stacked
+  DRAFT_FLAG=""
+  [ "$BRANCH_STRATEGY" = "stacked" ] && [ "$PR_BASE" != "main" ] && DRAFT_FLAG="--draft"
+
+  PR_BODY=$(build_pr_body "$SUB" "${SUBTASK_RESULTS[$SUB]}")
+  PR_URL=$(gh pr create \
+    --base "$PR_BASE" \
+    --head "$BRANCH" \
+    --title "sub-${SUB}: ${SUBTASK_TITLE[$SUB]}" \
+    --body "$PR_BODY" \
+    $DRAFT_FLAG \
+    2>&1 | tail -1)
+
+  record_subtask_state "$SUB" pr_url="$PR_URL" pr_base="$PR_BASE" pr_state="OPEN"
+done
+```
+
+### 11.3 PR Body Builder (per-sub-task)
 
 ```markdown
-## Summary
-{brief description of all changes}
+## Sub-task: {title}
+{sub-task summary from plan}
 
 ## Artifacts
-| # | Subtask | Status | Artifact |
-|---|---------|--------|----------|
-| 1 | Research | ✅ | research-notes.md |
-| 2 | Writing  | ✅ | draft.md |
-| 3 | Graphics | ❌ | N/A — image API unavailable |
+| # | Item | Path |
+|---|------|------|
+| 1 | {artifact-1} | `path/...` |
+| 2 | {artifact-2} | `path/...` |
+
+## Review rounds
+{review_rounds} cross-review round(s) executed; final review verdict PASS.
 
 ## Files Changed
-{git diff --stat output}
+```text
+{git -C $WT diff --stat origin/$BASE}
+```
 
-## Verification
-- [ ] All review gates passed
-- [ ] No dangerous keyword hits
-- [ ] Acceptance criteria met
+## Stacked Branch (if applicable)
+This sub-task targets branch `{base_branch}` while its parent is open. The
+coordinator will auto-rebase onto `main` and flip the base once the parent
+PR merges.
 
 ## ⚠️ Partial Delivery (if applicable)
-The following items could not be completed and require manual follow-up:
-- **Graphics**: Image generation API was unavailable after 3 retries.
-  Suggested: use an alternative service (Midjourney, DALL·E) or source from stock.
+The workflow delivered this sub-task in degraded mode — see state file.
 ```
 
-### 11.3 Conflict Check & Auto-Fix
+### 11.4 Conflict Auto-Fix (per-sub-task, scoped to its worktree)
 
 ```bash
-autofix_count=0
+auto_resolve_conflicts_in_wt() {
+  local wt="$1"
+  local files="$2"
+  # Spawn a FRESH execution terminal to read conflict markers and resolve
+  local handle
+  handle=$(orca terminal create \
+    --worktree "$(basename "$wt")" \
+    --title "autofix $(basename "$wt")" \
+    --command "$(agent_command_for "$ORCA_WORKFLOW_EXECUTION_AGENT")" \
+    --tags "autofix" \
+    --json | jq -r '.result.terminal.handle')
 
-while [ $autofix_count -lt $MAX_AUTOFIX ]; do
-  # Fetch latest base
-  git fetch origin main
+  orca orchestration dispatch --to "$handle" --inject \
+    --spec "Resolve the merge conflicts in:
+$files
 
-  # Check for merge conflicts
-  if git merge-base --is-ancestor origin/main HEAD; then
-    echo "✅ No conflicts — branch is ahead of main."
-    break
-  fi
+For each conflict, prefer the side that better matches the sub-task's
+acceptance criteria. After resolving, complete the rebase with
+'git add -A && git rebase --continue'. Do NOT push."
+  wait_for_worker "$handle"
+  orca terminal close --handle "$handle"
 
-  # Attempt rebase
-  if git rebase origin/main 2>/dev/null; then
-    echo "✅ Rebase succeeded."
-    break
-  fi
-
-  # Conflict detected
-  autofix_count=$((autofix_count + 1))
-  CONFLICT_FILES=$(git diff --name-only --diff-filter=U)
-
-  echo "⚠️ Merge conflict detected (attempt $autofix_count/$MAX_AUTOFIX)"
-  echo "Conflicting files: $CONFLICT_FILES"
-
-  if [ $autofix_count -lt $MAX_AUTOFIX ]; then
-    # Attempt AI-assisted conflict resolution
-    echo "Attempting auto-resolution..."
-    # The coordinator (this agent) reads conflict markers and resolves
-    # If successful → continue loop
-    # If not → break to human escalation
-    if ! auto_resolve_conflicts "$CONFLICT_FILES"; then
-      break
-    fi
-  fi
-done
-
-if [ $autofix_count -ge $MAX_AUTOFIX ] || ! git rebase --continue 2>/dev/null; then
-  # Escalate to human
-  orca orchestration ask \
-    --to coordinator \
-    --question "⚠️ Unable to auto-resolve merge conflicts after $autofix_count attempts.\n\nConflicting files:\n$CONFLICT_FILES\n\nPlease resolve manually or choose to park." \
-    --options "Resolved — continue,Park — keep branch for later"
-fi
+  # Verify the rebase completed cleanly
+  ( cd "$wt" && git rebase --continue 2>/dev/null || git status --porcelain | grep -q '^UU' )
+}
 ```
 
-### 11.4 PR Creation (PR-Only Path)
+### 11.5 PR Lifecycle Monitoring (per-sub-task)
+
+Each sub-task has its own gate; sub-tasks are monitored concurrently.
 
 ```bash
-# Push branch
-git push -u origin "$BRANCH"
+monitor_subtask_pr() {
+  local sub="$1"
+  local pr_url="${SUBTASK_PR_URL[$sub]}"
 
-# Create PR
-PR_URL=$(gh pr create \
-  --title "${TASK_TITLE}" \
-  --body "$(cat /tmp/pr_body.md)" \
-  --base main \
-  --head "$BRANCH" \
-  2>&1)
+  while :; do
+    local pr_state pr_merge
+    read pr_state pr_merge < <(gh pr view "$pr_url" --json state,mergeStateStatus -q '"\(.state) \(.mergeStateStatus)"')
 
-echo "PR created: $PR_URL"
+    case "$pr_state $pr_merge" in
+      "MERGED "*) record_subtask_state "$sub" pr_state="MERGED" merged_at="$(date -Iseconds)"; return 0 ;;
+      "CLOSED "*) record_subtask_state "$sub" pr_state="CLOSED"; return 0 ;;
+      "OPEN BLOCKED"|"OPEN DIRTY")
+        echo "sub-$sub PR blocked; trying auto-fix…"
+        # Same auto-fix loop, no human escalation yet
+        ;;
+      "OPEN CLEAN"|"OPEN UNKNOWN")
+        orca orchestration gate-create \
+          --task "${SUBTASK_TASK[$sub]}" \
+          --question "PR ${pr_url} (sub-${sub}) ready for review." \
+          --options '["Approved & Merged","Changes Requested","Closed"]' \
+          --json
+        ;;
+    esac
+
+    sleep "${PR_REVIEW_POLL_INTERVAL:-60}"
+  done
+}
 ```
 
-### 11.5 PR Lifecycle Monitoring
+### 11.6 Handling Review Feedback (Changes Requested)
+
+When a sub-task's PR receives "Changes Requested":
 
 ```bash
-while true; do
-  PR_STATE=$(gh pr view --json state,mergeStateStatus -q '[.state, .mergeStateStatus] | join(",")')
+# Spawn a fresh execution terminal for the fix-up commit
+fix_handle=$(orca terminal create \
+  --worktree "${SUBTASK_BRANCH[$sub]}" \
+  --title "sub-$sub pr-feedback fix" \
+  --command "$(agent_command_for "$ORCA_WORKFLOW_EXECUTION_AGENT")" \
+  --tags "execution,pr-fix" \
+  --json | jq -r '.result.terminal.handle')
 
-  case "$PR_STATE" in
-    "OPEN,BLOCKED")
-      echo "PR is blocked (likely conflicts or CI). Checking..."
-      # The coordinator can attempt to fix and push
-      ;;
-    "OPEN,CLEAN"|"OPEN,UNKNOWN")
-      echo "PR is open and clean. Waiting for review..."
-      # Create a gate to wait for human review
-      orca orchestration gate-create \
-        --task "$PR_TASK_ID" \
-        --question "PR ${PR_URL} is ready for review. Status?" \
-        --options '["Approved & Merged","Changes Requested","Closed"]' \
-        --json
-      ;;
-    "MERGED,"*)
-      echo "✅ PR merged."
-      transition to CLEANING
-      break
-      ;;
-    "CLOSED,"*)
-      echo "⚠️ PR was closed without merging."
-      transition to CLEANING (with park flag)
-      break
-      ;;
-  esac
+orca orchestration dispatch --to "$fix_handle" --inject \
+  --spec "PR feedback for sub-${sub} on ${pr_url}:
+$pr_feedback
 
-  sleep "${PR_REVIEW_POLL_INTERVAL:-60}"
-done
-```
-
-### 11.6 Handling Review Feedback
-
-When a PR receives change requests:
-
-```bash
-# Apply fixes
-git checkout "$BRANCH"
-# ... make changes ...
-
-# Commit and push to same branch
-git add -A
-git commit -m "fix: address PR review feedback"
-git push origin "$BRANCH"
-
-# The PR updates automatically — return to monitoring loop
+Apply the changes to the worktree at ${WORKTREE_PATH}, commit, and push.
+Then emit worker_done."
+wait_for_worker "$fix_handle"
+record_subtask_state "$sub" keep_terminal="$fix_handle"
+# Loop continues — PR will be re-monitored
 ```
 
 ### 11.7 Output
@@ -1397,71 +1423,155 @@ git push origin "$BRANCH"
 {
   "phase": "MERGING",
   "status": "complete",
-  "pr_url": "https://github.com/org/repo/pull/123",
-  "pr_state": "MERGED",
-  "autofix_attempts": 0,
+  "subtasks": [
+    {"id":"sub-1","pr_url":"https://github.com/org/repo/pull/123","pr_base":"main","pr_state":"MERGED","merged_at":"2026-07-27T11:50:00Z"},
+    {"id":"sub-2","pr_url":"https://github.com/org/repo/pull/124","pr_base":"feature/add-user-prefs/prefs-api-20260727-1030","pr_state":"MERGED","merged_at":"2026-07-27T12:05:00Z"}
+  ],
   "delivery_mode": "full",
-  "timestamp": "2026-07-26T12:00:00Z"
+  "timestamp": "2026-07-27T12:10:00Z"
 }
 ```
 
+### 11.8 Stacked-PR Rebase Hook (NEW)
+
+Whenever a parent sub-task's PR transitions to `MERGED`, every dependent sub-task must be auto-rebased onto the new `main` and have its PR base flipped.
+
+```bash
+on_parent_merge() {
+  local merged_sub="$1"
+  local merged_branch="${SUBTASK_BRANCH[$merged_sub]}"
+
+  for dependent in "${SUBTASK_DEPENDENTS[$merged_sub]}"; do
+    local wt="${SUBTASK_WT[$dependent]}"
+    local branch="${SUBTASK_BRANCH[$dependent]}"
+    local pr_url="${SUBTASK_PR_URL[$dependent]}"
+
+    echo "🔁 Stacked rebase: sub-$dependent → main (parent sub-$merged_sub just merged)"
+
+    ( cd "$wt" && git fetch origin main && git rebase origin/main ) || {
+      echo "⚠️  sub-$dependent stacked rebase failed — opening new fix round"
+      request_fix_round "$dependent" "Stacked rebase conflict after parent merged"
+      continue
+    }
+    ( cd "$wt" && git push --force-with-lease origin "$branch" )
+
+    # Flip PR base: sub-task's PR was targeting parent's branch; now it should target main
+    gh pr edit "$pr_url" --base main 2>/dev/null || true
+
+    # Promote from draft (if it was draft)
+    gh pr ready "$pr_url" 2>/dev/null || true
+
+    record_subtask_state "$dependent" pr_base="main"
+  done
+}
+```
+
+This hook fires after every sub-task transition to `MERGED`, processing its direct dependents. Indirect dependents are reached transitively as their immediate parents merge.
+
 ---
 
-## 12. Phase 8 — Cleanup & Archival
+## 12. Phase 8 — Cleanup & Archival (per-subtask)
 
-**Goal**: Remove temporary resources, archive state, and notify the user.
+**Goal**: For **each** sub-task, delete its remote branch, remove its local worktree, close its keep_terminal, and write a per-sub-task parked manifest when applicable. Cleanup runs in **reverse-topological order** so dependents are torn down before their parents.
 
 ### 12.1 Entry Condition
 
 - State: `CLEANING`
-- PR merged or parked
+- All sub-tasks have a terminal `pr_state` (`MERGED`, `CLOSED`, `PARKED`, or `SKIPPED`)
 
-### 12.2 Merged Path — Full Cleanup
+### 12.2 Process — per-sub-task cleanup in reverse-topological order
 
 ```bash
-# Delete remote branch
-git push origin --delete "$BRANCH"
+REVERSE_TOPO=($(reverse_topo_sort "${TOPO_IDS[@]}"))
 
-# Remove local worktree
-orca worktree remove "$BRANCH"
+for SUB in "${REVERSE_TOPO[@]}"; do
+  BRANCH="${SUBTASK_BRANCH[$SUB]}"
+  WT="${SUBTASK_WT[$SUB]}"
+  KEEP_TERM="${SUBTASK_KEEP_TERMINAL[$SUB]}"
+  PR_STATE="${SUBTASK_PR_STATE[$SUB]}"
 
-# Switch back to main
+  case "$PR_STATE" in
+    MERGED)
+      # 12.2.1 Merged path — full cleanup
+      git push origin --delete "$BRANCH" 2>/dev/null || true
+      orca worktree remove "$BRANCH" 2>/dev/null || true
+      [ -n "$KEEP_TERM" ] && orca terminal close --handle "$KEEP_TERM" 2>/dev/null || true
+      record_subtask_state "$SUB" disposition="MERGED" branch_deleted=true worktree_removed=true
+      ;;
+
+    PARKED)
+      # 12.2.2 Parked path — write per-sub-task manifest, leave worktree
+      write_parked_manifest "$SUB"
+      [ -n "$KEEP_TERM" ] && orca terminal close --handle "$KEEP_TERM" 2>/dev/null || true
+      record_subtask_state "$SUB" disposition="PARKED" park_manifest=".orca/parked/${SUB}.md"
+      ;;
+
+    SKIPPED|FAIL)
+      # 12.2.3 Failed/skipped path — drop worktree and branch, no manifest
+      git push origin --delete "$BRANCH" 2>/dev/null || true
+      orca worktree remove "$BRANCH" 2>/dev/null || true
+      [ -n "$KEEP_TERM" ] && orca terminal close --handle "$KEEP_TERM" 2>/dev/null || true
+      record_subtask_state "$SUB" disposition="DROPPED" branch_deleted=true worktree_removed=true
+      ;;
+
+    *)
+      echo "⚠️  sub-$SUB has unexpected pr_state=$PR_STATE; skipping cleanup"
+      ;;
+  esac
+
+  # Always append a per-sub-task history line
+  cat >> .orca/workflow-history.jsonl << EOF
+{"workflow_id":"$WORKFLOW_ID","subtask_id":"$SUB","branch":"$BRANCH","pr_state":"$PR_STATE","disposition":"${DISPOSITION[$SUB]:-UNKNOWN}","timestamp":"$(date -Iseconds)"}
+EOF
+done
+
+# Workflow-level: switch back to main + summary
 git checkout main
 git pull
-
-# Record completion
-cat >> .orca/workflow-history.jsonl << EOF
-{"workflow_id":"$WORKFLOW_ID","status":"COMPLETED","branch":"$BRANCH","timestamp":"$(date -Iseconds)"}
-EOF
 ```
 
-### 12.3 Parked Path — Archival
+### 12.3 Per-Sub-Task Parked Manifest
 
 ```bash
-# Create parked task manifest
-mkdir -p .orca/parked
+write_parked_manifest() {
+  local sub="$1"
+  mkdir -p .orca/parked
 
-cat > ".orca/parked/${BRANCH}.md" << PARK_EOF
-# Parked Workflow: ${TASK_TITLE}
+  cat > ".orca/parked/${sub}.md" << PARK_EOF
+# Parked Sub-task: ${SUBTASK_TITLE[$sub]} (sub-${sub})
 
-- **Branch**: \`${BRANCH}\`
-- **Worktree path**: \`${WORKTREE_PATH}\`
+- **Branch**: \`${SUBTASK_BRANCH[$sub]}\`
+- **Worktree path**: \`${SUBTASK_WT[$sub]}\`
+- **Base branch**: \`${SUBTASK_BASE[$sub]}\`
+- **PR**: ${SUBTASK_PR_URL[$sub]:-none}
 - **Parked at**: $(date -Iseconds)
-- **Reason**: ${PARK_REASON}
-- **PR**: ${PR_URL}
+- **Reason**: ${SUBTASK_PARK_REASON[$sub]:-manual}
+
+## Dependencies
+$(printf -- '- %s\n' "${SUB_DEPS[$sub]}")
+
+## Stacked-Chain Context
+$(if [ "${SUBTASK_BASE[$sub]}" != "main" ]; then
+    echo "This sub-task is stacked on \`${SUBTASK_BASE[$sub]}\`."
+    echo "Resolve the parent first, then rebase this branch onto main."
+  else
+    echo "Independent of other sub-tasks (no parent)."
+  fi)
 
 ## Recovery Steps
-1. \`cd "${WORKTREE_PATH}"\`
-2. \`git fetch origin && git rebase origin/main\`
+1. \`cd "${SUBTASK_WT[$sub]}"\`
+2. \`git fetch origin && git rebase origin/main\`  (or \`git rebase ${SUBTASK_BASE[$sub]}\` if stacked)
 3. Resolve any new conflicts
-4. \`gh pr edit ${PR_URL} --add-label "ready-for-review"\` or create a new PR
-5. Resume from Phase 7 of the workflow
+4. \`git push --force-with-lease origin "${SUBTASK_BRANCH[$sub]}"\`
+5. If PR was draft: \`gh pr ready "${SUBTASK_PR_URL[$sub]}"\`
+6. Resume the workflow (or rerun Phase 7 for this sub-task only)
 
 ## Artifacts
-$(ls -1 artifacts/)
+$(ls -1 "${SUBTASK_WT[$sub]}/artifacts/" 2>/dev/null || echo "(none)")
 PARK_EOF
 
-echo "Workflow parked. Recovery instructions: .orca/parked/${BRANCH}.md"
+  echo "sub-${sub} parked → .orca/parked/${sub}.md"
+}
 ```
 
 ### 12.4 User Notification
@@ -1471,7 +1581,13 @@ DELIVERY_REPORT=$(generate_delivery_report)
 
 orca orchestration ask \
   --to coordinator \
-  --question "🎉 Workflow complete!\n\n${DELIVERY_REPORT}\n\nArtifacts are in the workspace." \
+  --question "🎉 Workflow complete!
+
+${DELIVERY_REPORT}
+
+Each sub-task has its own merged PR or a per-sub-task parked manifest in
+\`./.orca/parked/\`. Artifacts are in each sub-task's worktree (already
+cleaned up) or in \`./.orca/parked/<sub>.md\` for parked sub-tasks." \
   --timeout-ms 0
 ```
 
@@ -1481,11 +1597,12 @@ orca orchestration ask \
 {
   "phase": "CLEANING",
   "status": "complete",
-  "disposition": "MERGED",
-  "branch_deleted": true,
-  "worktree_removed": true,
-  "park_manifest": null,
-  "timestamp": "2026-07-26T12:05:00Z"
+  "subtasks": [
+    {"id":"sub-1","disposition":"MERGED","branch_deleted":true,"worktree_removed":true},
+    {"id":"sub-2","disposition":"MERGED","branch_deleted":true,"worktree_removed":true}
+  ],
+  "parked_subtasks": [],
+  "timestamp": "2026-07-27T12:15:00Z"
 }
 ```
 
