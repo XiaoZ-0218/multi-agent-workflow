@@ -513,6 +513,7 @@ plan_task_id = task_create(
     spec=build_plan_spec(clarified_requirement),   # format: summary, approach,
 )                                                  # subtask DAG w/ deps+owns, risks, acceptance
 plan_handle = terminal_create(title=f"[plan:{PLAN_AGENT}] plan r0", command=agent_command_for(PLAN_AGENT))
+terminal_wait(plan_handle, for_="tui-idle", timeout_ms=60000)   # ready before inject (§8.3.3)
 dispatch(task=plan_task_id, to=plan_handle, inject=True)
 
 while review_round < MAX_REVIEW_ROUNDS:              # default 3
@@ -526,6 +527,7 @@ while review_round < MAX_REVIEW_ROUNDS:              # default 3
     )
     review_handle = terminal_create(title=f"[review:{REVIEW_AGENT}] plan r{review_round}",
                                     command=agent_command_for(REVIEW_AGENT))
+    terminal_wait(review_handle, for_="tui-idle", timeout_ms=60000)
     dispatch(task=review_task_id, to=review_handle, inject=True)
     verdict = await wait_worker_done(review_task_id) # {"verdict":"PASS"|"FAIL","feedback":...}
     terminal_close(review_handle)
@@ -544,6 +546,7 @@ while review_round < MAX_REVIEW_ROUNDS:              # default 3
                                    parent=plan_task_id)
         plan_handle = terminal_create(title=f"[plan:{PLAN_AGENT}] plan r{review_round}",
                                       command=agent_command_for(PLAN_AGENT))
+        terminal_wait(plan_handle, for_="tui-idle", timeout_ms=60000)
         dispatch(task=plan_task_id, to=plan_handle, inject=True)
     else:
         # Escalate to the human via the NATIVE channel
@@ -780,6 +783,14 @@ for SUB in $(subtasks_in_wave 0); do
     --command "$(agent_command_for "$AGENT")" \
     --json | jq -r '.result.terminal.handle')
 
+  # Wait for the agent CLI to be READY before injecting — dispatch --inject
+  # types the preamble+task into the terminal, and a still-booting agent can
+  # lose or garble it (lost preamble = the worker never reports worker_done
+  # and the coordinator stalls at checkpoints). Applies to EVERY fresh
+  # terminal in every phase (plan/review/execution/fix/fallback/autofix/
+  # pr-fix/integration-review).
+  orca terminal wait --terminal "$TERM" --for tui-idle --timeout-ms 60000 --json
+
   BASE_SHA=$(cd "$WT_PATH" && git rev-parse HEAD)            # record per dispatch
 
   orca orchestration dispatch --task "$TASK_ID" --to "$TERM" --inject --json
@@ -852,12 +863,16 @@ Your ownership (owns): {owns_globs}
    to the owns globs, against the review criteria below.
 4. You are ONE round of one subtask. Do not review your own output; do not
    dispatch other agents; do not push, merge, or create PRs.
-5. When finished, emit worker_done EXACTLY ONCE to the coordinator handle with
-   {taskId, dispatchId, verdict, artifact summary}, then idle. Put the verdict
-   in BOTH the subject (prefix "PASS"/"FAIL") and the payload
+5. When finished, emit worker_done IMMEDIATELY and EXACTLY ONCE to the
+   coordinator handle with {taskId, dispatchId, verdict, artifact summary} —
+   send it BEFORE writing any long report or wrap-up, then idle (no polling,
+   no further output). Put the verdict in BOTH the subject (prefix
+   "PASS"/"FAIL") and the payload
    ({"verdict":"PASS"|"FAIL","reason":...}) — the coordinator reads the payload
    first and falls back to the subject prefix (smoke-run finding: some agents
-   only write the subject).
+   only write the subject). While working, send a heartbeat every 5 minutes
+   per Orca's injected preamble — a stopped heartbeat plus an idle terminal
+   is how the coordinator detects "finished but forgot to report".
 
 ## Task spec
 {spec}
@@ -937,6 +952,7 @@ For each subtask in the current wave (in parallel):
                                                                # Orca circuit-breaks a task after
                                                                # 3 consecutive failures
       exec_handle = terminal_create(fresh, title="[fix:<agent>] sub-N r{round}")
+      terminal_wait(exec_handle, for_="tui-idle", timeout_ms=60000)   # ready before inject
       dispatch(task=exec_task_id, to=exec_handle, inject=True)
       prev_task_id = exec_task_id
       subtask.keep_terminal = exec_handle
@@ -954,6 +970,7 @@ For each subtask in the current wave (in parallel):
     review_task_id = task_create(spec=build_review_spec(subtask, base_sha=subtask.base_sha),
                                  parent=prev_task_id)
     review_handle = terminal_create(fresh, title="[review:<review_agent>] sub-N r{round}")
+    terminal_wait(review_handle, for_="tui-idle", timeout_ms=60000)   # ready before inject
     dispatch(task=review_task_id, to=review_handle, inject=True)
     verdict = wait_for_worker(review_task_id)
     terminal_close(review_handle)             # reviewer torn down after verdict
@@ -990,20 +1007,35 @@ routinely take 15–60 minutes.
 while :; do
   EVENT=$(orca orchestration check --wait \
     --types worker_done,escalation,decision_gate \
-    --timeout-ms 300000 --json)
+    --timeout-ms 300000 --json)   # never exceed 300000: the tool runtime
+                                  # caps one foreground call at ~300s
 
   if is_timeout "$EVENT"; then
-    # Checkpoint: verify liveness instead of failing.
-    orca orchestration task-list --json | jq '.result.tasks[] | {id,status}'
-    # Optionally read the terminal output of any task stuck in `dispatched`
-    # to confirm the worker is still making progress.
+    # Checkpoint: verify liveness instead of failing. IN ORDER:
+    orca orchestration dispatch-show --task "$TASK_ID" --json
+      # dispatch status + last_heartbeat_at — a fresh heartbeat means
+      # "alive, still working", NOT done. Never close/restart a worker
+      # just because it has been silent.
+    orca orchestration task-list --brief --json | jq '.result.tasks[] | {id,status}'
+    orca terminal read --terminal "$HANDLE" --json   # or: terminal wait --for tui-idle --timeout-ms 30000
+      # terminal IDLE + heartbeat stale + task still `dispatched`
+      #   → worker finished but forgot worker_done: collect the result
+      #     from the terminal output / task-list and mark it completed
+      #     (manual task-update is recovery/override only — see below)
+      # terminal still active → keep waiting.
     continue
   fi
 
   handle_event "$EVENT"     # worker_done → record verdict; escalation → native channel
                             # verdict extraction: payload.verdict first, then the
                             # subject's "PASS"/"FAIL" prefix as fallback (§8.5 rule 5)
+                            # NOTE: a valid worker_done marks task+dispatch completed
+                            # AUTOMATICALLY — do NOT follow with task-update.
   all_wave_verdicts_in && break
+  # check --wait returns ONE message at a time. When N workers can finish
+  # together, loop again IMMEDIATELY to drain the next pending event before
+  # doing any heavy local work (state rewrites, summaries) — otherwise queued
+  # completions sit unread and the wave stalls.
 done
 ```
 
@@ -1612,7 +1644,7 @@ Terminal `role` enum: `execution` | `review` | `fix` | `fallback` | `autofix` |
 |-----------------|-----------|-------------------|-----------------|
 | Orca becomes unreachable | `orca status` fails | Retry 3x with 5s backoff | Restart Orca, reload state from `.orca/workflow-state.json` |
 | Task circuit breaker (3 consecutive failures on one task) | dispatch/check errors referencing the same task id | **Never re-dispatch the same task** — create a NEW task chained with `--parent` and dispatch it to a fresh terminal | Inspect why the task keeps failing before creating the next one |
-| Lost `worker_done` (worker finished but the event never arrived) | `check --wait` timeout with the task still `dispatched` | Timeout = checkpoint: inspect `task-list` and read the terminal for liveness; if the worker is idle/done, collect its result from `task-list` and mark the task completed | If the terminal is truly dead, close it and dispatch a NEW task to a fresh terminal |
+| Lost `worker_done` (worker finished but the event never arrived) | `check --wait` timeout with the task still `dispatched` | Timeout = checkpoint: `dispatch-show` → `last_heartbeat_at` stale + `terminal read`/`terminal wait --for tui-idle` shows the worker IDLE → collect the result from the terminal output / `task-list` and mark the task completed (recovery override). Heartbeat fresh or terminal active = still working — keep waiting, never close/restart for silence alone | If the terminal is truly dead, close it and dispatch a NEW task to a fresh terminal |
 | **owns violation** (worker wrote outside its `owns`) | Coordinator `git status --porcelain` / `git diff` check after each round shows paths outside the subtask's `owns` globs | Coordinator reverts the offending files (`git checkout -- <paths>`; `git clean -fd <paths>` for untracked), records an error, counts the round as FAIL with feedback | Persistent violations → fail the subtask, let Phase 6 decide |
 | Plan review loops indefinitely | `review_round >= MAX_REVIEW_ROUNDS` | Escalate to the user (native channel, up to 2x) | User provides direction or terminates |
 | Subtask wall-clock timeout | Elapsed > `timeout_ms` | `task-update --status failed` + `orca terminal close`; Phase 6 decides | Increase timeout, retry the subtask |
@@ -1849,9 +1881,10 @@ dispatch` has **no `--spec`**, and `orca worktree remove` does not exist (use
 |---------|----------|---------|
 | `task-create --spec <text> [--task-title] [--display-name] [--deps <json_array>] [--parent <task_id>] --json` | 2, 4, 5, 7 | Create plan/review/subtask/fix/autofix/integration-review tasks; `--parent` chains rounds |
 | `dispatch --task <id> --to <handle> [--inject] --json` | 2, 4, 5, 7 | Send a task to a fresh terminal. **No `--spec`** — new instructions require a NEW task |
-| `check --wait --types worker_done,escalation,decision_gate --timeout-ms <n> --json` | 2, 5, 7 | Block for worker events; timeout = checkpoint, keep rolling (long tasks take 15–60 min) |
-| `task-list [--status] [--ready] --json` | 5, 6, recovery | Poll statuses; liveness check after `check` timeouts; find stragglers |
-| `task-update --id <id> --status <pending\|ready\|dispatched\|completed\|failed\|blocked> [--result <json>]` | 5, 6, recovery | Mark timeouts/cancellations; record results |
+| `check --wait --types worker_done,escalation,decision_gate --timeout-ms <n> --json` | 2, 5, 7 | Block for worker events; returns ONE message at a time — drain queued events before heavy local work; timeout = checkpoint, keep rolling (long tasks take 15–60 min; keep `<n>` ≤ 300000) |
+| `task-list [--status] [--ready] [--brief] --json` | 5, 6, recovery | Poll statuses; liveness check after `check` timeouts; find stragglers (`--brief` caps echoed specs at 160 chars) |
+| `dispatch-show --task <id> --json` | 5, recovery | Checkpoint liveness: dispatch status + `last_heartbeat_at` (fresh heartbeat = alive, NOT done) |
+| `task-update --id <id> --status <pending\|ready\|dispatched\|completed\|failed\|blocked> [--result <json>]` | recovery ONLY | A valid `worker_done` auto-completes task+dispatch — never follow one with `task-update completed`. Manual updates are for timeouts/cancellations/overrides |
 | `gate-create --task <id> --question <text> [--options <json_array>]` | coordinator-managed DAG decisions ONLY | Every gate must name who resolves it. **Never** for agent reviews (use a review task + `worker_done`); **never** inside the PR poll loop |
 | `ask --to <coordinator_handle>` | worker → coordinator ONLY | Workers escalate to the coordinator. The coordinator asks the USER via its **native** channel |
 | `run --spec <text>` | — | Orca's **native single-agent runner** — listed for completeness; this workflow is started by describing the task to the coordinator in chat (§17.1) |
@@ -1871,6 +1904,8 @@ dispatch` has **no `--spec`**, and `orca worktree remove` does not exist (use
 |---------|----------|---------|
 | `terminal list --json` → `.result.terminals[]` fields: `handle,title,worktreeId,worktreePath,branch,connected,writable,…` | 5, 8, recovery | Liveness inspection; no `type`/`tags` fields exist |
 | `terminal create --worktree id:<id> --title "[<role>:<agent>] …" --command "<agent cli>" --json` | 2, 4, 5, 7 | Spawn a FRESH terminal for every round of every role. Selectors: `id:`/`name:`/`path:`/`branch:`/`active`. No `--tags` |
+| `terminal wait --terminal <handle> --for tui-idle --timeout-ms <n> --json` | 2, 4, 5, 7 | **Mandatory after every `terminal create`, before `dispatch --inject`** (60s timeout) — a still-booting agent can lose the injected preamble. Also a short-timeout liveness probe at checkpoints |
+| `terminal read --terminal <handle> --json` | 5, recovery | Checkpoint inspection: idle vs still-working; collect results when a worker forgot `worker_done` |
 | `terminal close --terminal <handle> --json` | 5, 7, 8 | Tear down review terminals after each round; close keep_terminal(s) in Phase 8. Uses `--terminal`, not `--handle` |
 
 ### 18.4 External Commands Used

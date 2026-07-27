@@ -17,6 +17,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "reviewer ≠ implementer" rule. Single source of truth:
   `docs/agent-routing.md` §6.
 
+### Added
+- **Agent-readiness gate before every dispatch**: `orca terminal wait
+  --terminal <handle> --for tui-idle --timeout-ms 60000` is now mandatory
+  between `terminal create` and `dispatch --inject` (§6.2, §8.3.3, §9.2,
+  §18.3). A still-booting agent CLI can lose or garble the injected
+  preamble+task — the worker then never reports `worker_done` and the
+  coordinator stalls at checkpoints.
+- **Active checkpoint liveness**: the §9.3 rolling wait loop now inspects
+  `dispatch-show`'s `last_heartbeat_at` plus `terminal read` /
+  `terminal wait --for tui-idle` at each `check --wait` timeout. A fresh
+  heartbeat means "alive, still working" (never close/restart for silence
+  alone); a stale heartbeat plus an idle terminal means "finished but
+  forgot to report" — collect the result immediately instead of waiting
+  more cycles.
+
+### Fixed
+- **Wave stalls from late-drained events**: `check --wait` returns ONE
+  message at a time; the coordinator must re-check immediately to drain
+  queued completions before heavy local work (§9.3).
+- **Double completion**: a valid `worker_done` marks task+dispatch
+  completed automatically; manual `task-update` is now documented as
+  recovery/override only (§18.1).
+- **Worker reporting order**: §8.5 rule 5 requires sending `worker_done`
+  BEFORE writing long reports, plus a heartbeat every 5 minutes while
+  working (per Orca's injected preamble).
+
 ## [2.2.0] — 2026-07-27
 
 ### Changed (BREAKING)
