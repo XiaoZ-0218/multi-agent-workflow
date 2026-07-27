@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://orca.app/schemas/workflow-state.json",
   "title": "Workflow State",
-  "description": "Schema for .orca/workflow-state.json — the persistent state file for multi-agent-workflow runs. v2.1.0 adds per-subtask worktree/branch/PR fields so each sub-task is an isolated, reviewable unit.",
+  "description": "Schema for .orca/workflow-state.json — the persistent state file for multi-agent-workflow runs. v2.2.0: one run = one feature = ONE shared feature worktree + ONE feature branch (feature/<slug>, based on origin/main) + ONE PR. The coordinator stays on the main branch and never checks out; subtasks execute inside the shared worktree and are kept parallel-safe by disjoint per-subtask `owns` path globs, not by filesystem isolation. Per-subtask worktrees/branches/PRs, stacked branches, and draft PRs are removed.",
   "type": "object",
   "required": ["workflow_id", "version", "started_at", "current_phase", "current_state"],
   "properties": {
@@ -28,12 +28,12 @@
     },
     "current_phase": {
       "type": "string",
-      "enum": ["GATHERING", "PLANNING", "CONFIRMING", "DISPATCHING", "EXECUTING", "DECIDING", "MERGING", "CLEANING", "DONE", "TERMINATED"],
+      "enum": ["INIT", "GATHERING", "PLANNING", "CONFIRMING", "DISPATCHING", "EXECUTING", "DECIDING", "MERGING", "CLEANING", "DONE", "TERMINATED"],
       "description": "Current phase of the workflow"
     },
     "current_state": {
       "type": "string",
-      "enum": ["GATHERING", "PLANNING", "CONFIRMING", "DISPATCHING", "EXECUTING", "DECIDING", "MERGING", "CLEANING", "DONE", "TERMINATED"],
+      "enum": ["INIT", "GATHERING", "PLANNING", "CONFIRMING", "DISPATCHING", "EXECUTING", "DECIDING", "MERGING", "CLEANING", "DONE", "TERMINATED"],
       "description": "Current state (may differ from phase during transitions)"
     },
     "termination_reason": {
@@ -46,14 +46,36 @@
       "enum": ["full", "degraded", null],
       "description": "Whether all artifacts were delivered (full) or some failed (degraded)"
     },
-    "branch": {
+    "feature_slug": {
       "type": "string",
-      "description": "Aggregate: branch name of the root sub-task (no deps), or the first sub-task by topological order. Kept for v2.0.x dashboard compat; prefer tasks.subtasks[*].branch_name."
+      "description": "Slug identifying the single feature for this run; names the worktree and the feature/<slug> branch"
     },
-    "pr_url": {
-      "type": "string",
-      "format": "uri",
-      "description": "Aggregate: PR URL of the root sub-task. Kept for v2.0.x dashboard compat; prefer tasks.subtasks[*].pr_url."
+    "worktree": {
+      "type": "object",
+      "description": "The ONE shared feature worktree (Phase 4), created via `orca worktree create --name <feature_slug> --base-branch origin/main`. All subtasks execute here.",
+      "properties": {
+        "id":          { "type": "string", "description": "Orca worktree id, read from the create command's JSON result" },
+        "path":        { "type": "string", "description": "Absolute path to the feature worktree" },
+        "branch_name": { "type": "string", "description": "feature/<slug>" },
+        "base_branch": { "type": "string", "description": "origin/main" }
+      }
+    },
+    "pr": {
+      "type": "object",
+      "description": "The ONE PR for the whole feature, created in Phase 7 (MERGING) after integration review passes",
+      "properties": {
+        "url":       { "type": "string", "format": "uri" },
+        "state":     { "type": "string", "enum": ["OPEN", "CHANGES_REQUESTED", "MERGED", "CLOSED", "PARKED", null] },
+        "merged_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "integration_review": {
+      "type": "object",
+      "description": "Whole-feature review in Phase 7 (new in v2.2.0): a fresh review-agent terminal reviews the plan, per-subtask verdicts, test results, and `git diff origin/main...HEAD`; ≤ max_integration_review_rounds (default 2) fix/re-review rounds, then human decision (release anyway or PARK)",
+      "properties": {
+        "rounds":  { "type": "integer", "minimum": 0, "description": "Integration review rounds executed so far" },
+        "verdict": { "type": "string", "enum": ["PASS", "FAIL", null] }
+      }
     },
     "phases": {
       "type": "object",
@@ -82,7 +104,7 @@
         },
         "subtasks": {
           "type": "array",
-          "description": "One entry per sub-task in the DAG. v2.1.0: each sub-task owns its own worktree, branch, terminals, and PR.",
+          "description": "One entry per sub-task in the DAG. v2.2.0: all sub-tasks share the single feature worktree (see top-level `worktree`); parallel safety within a wave comes from disjoint `owns` globs, validated during plan review.",
           "items": {
             "type": "object",
             "required": ["id", "logical_id", "status"],
@@ -92,23 +114,22 @@
               "title":                 { "type": "string" },
               "complexity":            { "type": "string", "enum": ["general", "complex", "image", null] },
               "deps":                  { "type": "array", "items": { "type": "string" } },
+              "owns":                  { "type": "array", "items": { "type": "string" }, "description": "File/dir path globs this sub-task owns; same-wave (parallel) sub-tasks must have disjoint owns" },
               "status":                { "type": "string", "enum": ["pending", "dispatched", "running", "completed", "failed", "parked"] },
               "verdict":               { "type": "string", "enum": ["PASS", "FAIL", null] },
-              "artifact":              { "type": "string" },
               "reason":                { "type": "string" },
-              "retries":               { "type": "integer", "minimum": 0 },
-              "worktree_path":         { "type": "string", "description": "Absolute path to the sub-task's dedicated worktree (Phase 4)" },
-              "branch_name":           { "type": "string", "description": "feature/<wf>/<sub>-<ts> (Phase 4)" },
-              "base_branch":           { "type": "string", "description": "main if no deps; otherwise parent sub-task's branch_name (stacked branches)" },
+              "base_sha":              { "type": "string", "description": "Feature-branch HEAD recorded at each dispatch; the review agent reviews only <base_sha>..HEAD changes within this sub-task's owns" },
+              "initial_base_sha":      { "type": "string", "description": "Feature-branch HEAD recorded once at the round-0 dispatch. Start of the degrade-revert range (§10): a failed sub-task's commits are reverted via <initial_base_sha>..HEAD limited to its owns" },
+              "review_rounds":         { "type": "integer", "minimum": 0, "description": "Number of cross-review rounds executed in Phase 5" },
               "terminals": {
                 "type": "array",
-                "description": "Every terminal spawned for this sub-task, oldest first. Intermediate terminals are closed after each round; the keep_terminal stays alive until Phase 8.",
+                "description": "Every terminal spawned for this sub-task, oldest first — a fresh terminal per round in the shared feature worktree. Intermediate terminals are closed after each round; the keep_terminal stays alive until Phase 8.",
                 "items": {
                   "type": "object",
                   "required": ["handle", "role", "round"],
                   "properties": {
                     "handle":      { "type": "string" },
-                    "role":        { "type": "string", "enum": ["execution", "review", "fix"] },
+                    "role":        { "type": "string", "enum": ["execution", "review", "fix", "fallback", "autofix", "pr-fix", "integration-review"] },
                     "round":       { "type": "integer", "minimum": 0 },
                     "agent_type":  { "type": "string", "description": "Resolved Agent name (claude / kimi / grok / pi / Plan)" },
                     "status":      { "type": "string", "enum": ["dispatched", "running", "completed", "failed", "closed"] },
@@ -118,12 +139,7 @@
                   }
                 }
               },
-              "keep_terminal":         { "type": "string", "description": "Handle of the terminal that produced the final implementation; torn down in Phase 8." },
-              "pr_url":                { "type": "string", "format": "uri" },
-              "pr_base":               { "type": "string", "description": "PR base branch — main if no deps, otherwise parent sub-task's branch (stacked)" },
-              "pr_state":              { "type": "string", "enum": ["DRAFT", "OPEN", "CHANGES_REQUESTED", "MERGED", "CLOSED", "PARKED", null] },
-              "merged_at":             { "type": "string", "format": "date-time" },
-              "review_rounds":         { "type": "integer", "minimum": 0, "description": "Number of cross-review rounds executed in Phase 5" }
+              "keep_terminal":         { "type": "string", "description": "Handle of the terminal that produced the final implementation; torn down in Phase 8." }
             }
           }
         }
@@ -138,7 +154,7 @@
           "result": { "type": "string" },
           "round": { "type": "integer" },
           "timestamp": { "type": "string", "format": "date-time" },
-          "subtask_id": { "type": "string", "description": "v2.1.0: scope of the decision — null = workflow-level, otherwise the sub-task it applies to" }
+          "subtask_id": { "type": "string", "description": "Scope of the decision — null = workflow-level, otherwise the sub-task it applies to" }
         }
       }
     },
@@ -160,7 +176,7 @@
           "severity": { "type": "string", "enum": ["WARN", "ERROR", "FATAL"] },
           "message": { "type": "string" },
           "timestamp": { "type": "string", "format": "date-time" },
-          "subtask_id": { "type": "string", "description": "v2.1.0: scope of the error" }
+          "subtask_id": { "type": "string", "description": "Scope of the error — null/omitted = workflow-level, otherwise the sub-task it applies to" }
         }
       }
     }

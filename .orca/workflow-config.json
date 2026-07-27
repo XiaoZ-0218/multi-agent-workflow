@@ -1,6 +1,6 @@
 {
   "workflow": {
-    "version": "2.1.0",
+    "version": "2.2.0",
     "limits": {
       "max_review_rounds": 3,
       "max_escalate_count": 2,
@@ -8,6 +8,7 @@
       "max_subtask_retries": 3,
       "max_global_retries": 2,
       "max_autofix_attempts": 2,
+      "max_integration_review_rounds": 2,
       "max_clarification_rounds": 5
     },
     "timeouts_ms": {
@@ -25,30 +26,16 @@
       "fallback_agent_type": "pi",
       "default_model": "sonnet"
     },
-    "branch_strategy": {
-      "_note": "v2.1.0: 每个 sub-task 一个 worktree + branch。stacked 模式下，有依赖的 sub-task 基于父任务的分支而非 main，以保留并行度。",
-      "mode": "stacked",
-      "branch_template": "feature/{workflow_slug}/{sub_slug}-{timestamp}",
-      "worktree_path_template": "../{workflow_slug}-{sub_slug}",
-      "draft_pr_when_stacked": true,
-      "rebase_on_parent_merge": true,
-      "flip_pr_base_on_parent_merge": true,
-      "delete_branch_after_merge": true
-    },
     "terminals": {
-      "_note": "v2.1.0: 每个 sub-task 的每个 round（execution / review / fix）都开一个新终端，挂在该 sub-task 的 worktree 上。模型选择在 terminal create 时通过 --command 指定，dispatch 层不支持传 model。",
+      "_note": "v2.2.0: 每个 sub-task 的每个 round（execution / review / fix / fallback / pr-fix / integration-review 等）都在共享的 feature worktree 里新开一个终端，不再按 sub-task 隔离 worktree。模型选择在 terminal create 时通过 --command 指定，dispatch 层不支持传 model；CLI 没有 --tags，Agent 身份由 --title 前缀约定和 coordinator 的状态记录（handle→role/round/agent_type）承载。",
       "spawn_per_role": true,
-      "review_terminal_role": "review",
-      "execution_terminal_role": "execution",
-      "close_intermediate_terminals": true,
-      "max_terminals_per_subtask": 8
+      "close_intermediate_terminals": true
     },
     "merge": {
       "mode": "pr_only",
       "auto_merge_on_approval": false,
       "require_ci_pass": true,
-      "delete_branch_after_merge": true,
-      "per_subtask_pr": true
+      "delete_branch_after_merge": true
     },
     "observability": {
       "log_level": "INFO",
