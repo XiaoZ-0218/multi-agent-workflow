@@ -1688,22 +1688,32 @@ A single JSON file at `.orca/workflow-state.json` tracks the entire run:
 
 | Operation | Permission Required | Agent Capability |
 |-----------|-------------------|-----------------|
-| Read files in workspace | File system access (default) | All agents |
-| Write files in workspace | File system access (default) | Execution agents only |
-| `git push` to remote | Git credentials configured | Coordinator only (Phase 7) |
-| `git push --delete` | Force-push permission on branch | Coordinator only (Phase 8) |
-| `gh pr create` | GitHub token with `repo` scope | Coordinator only (Phase 7) |
-| `gh pr merge` | Write access to target branch | Human only (never automated) |
+| Read files in **own sub-task's worktree** | File system access (default) | Execution / fix / review terminals |
+| Write files in **own sub-task's worktree** | File system access (default) | Execution / fix terminals only (review is read-only) |
+| Write files in **another sub-task's worktree** | **DENIED** by design — worktrees are isolated by `git worktree` mechanism | No agent |
+| `git push` to remote (own branch) | Git credentials configured | Coordinator only (Phase 7, 11.8 stacked-PR hook) |
+| `git push --delete` (own branch) | Force-push permission on branch | Coordinator only (Phase 8) |
+| `git push --force-with-lease` (stacked rebase) | Same as above | Coordinator only (§11.8 stacked-PR hook) |
+| `gh pr create` (per-sub-task, base = parent branch or main) | GitHub token with `repo` scope | Coordinator only (Phase 7) |
+| `gh pr edit --base main` | Same as above | Coordinator only (§11.8) |
+| `gh pr ready` (promote from draft) | Same as above | Coordinator only (§11.8) |
+| `gh pr merge` | Write access to target branch | **Human only — never automated** |
 | `orca orchestration dispatch` | Orca runtime access | Coordinator only |
 | `orca orchestration gate-resolve` | Orca runtime access | Designated reviewer agents |
-| `orca worktree remove` | Orca runtime access | Coordinator only (Phase 8) |
+| `orca worktree create` | Orca runtime access | Coordinator only (Phase 4 — once per sub-task) |
+| `orca worktree remove` | Orca runtime access | Coordinator only (Phase 8 — once per sub-task, reverse-topo) |
+| `orca terminal create` | Orca runtime access | Coordinator only (Phase 4 + Phase 5 + Phase 11.4 autofix + Phase 11.6 pr-feedback) |
+| `orca terminal close` | Orca runtime access | Coordinator only (Phase 5 round end + Phase 8 keep_terminal teardown) |
 
 ### 15.2 Principles
 
-1. **Least Privilege**: Workers can only read/write within their worktree; they cannot merge or delete branches.
-2. **No Automated Merge**: The workflow NEVER auto-merges a PR. Human approval is always required.
-3. **Immutable Audit Trail**: All decisions and state transitions are written to `.orca/workflow-state.json` before being acted upon.
-4. **Secret Isolation**: GitHub tokens and API keys are read from environment/credential store, never hardcoded in task specs.
+1. **Per-Sub-Task Isolation**: Each sub-task owns a dedicated worktree created via `git worktree`. The git worktree mechanism prevents any terminal from writing outside its sub-task's working directory — even if the Agent misbehaves.
+2. **Per-Round Agent Isolation**: Review terminals are read-only by tag convention (`review` tag → no `--write` flag in `orca terminal create` command). Fix terminals are write-enabled only inside their sub-task's worktree.
+3. **Least Privilege**: Workers (terminals) can only read/write within their sub-task's worktree; they cannot merge, delete branches, create PRs, or push. All those operations are coordinator-only.
+4. **No Automated Merge**: The workflow NEVER auto-merges a PR. Human approval is always required — even on sub-task PRs.
+5. **Stacked-Branch Auto-Rebase is Coordinator-Only**: The §11.8 stacked-PR rebase hook runs in the coordinator's terminal, never inside a sub-task's worker.
+6. **Immutable Audit Trail**: All decisions, terminal spawns, and state transitions are written to `.orca/workflow-state.json` before being acted upon. `tasks.subtasks[*].terminals[]` provides a per-round audit trail.
+7. **Secret Isolation**: GitHub tokens and API keys are read from environment/credential store, never hardcoded in task specs.
 
 ---
 
@@ -1868,11 +1878,11 @@ echo '{"status":"CANCELLED","cancelled_at":"'$(date -Iseconds)'"}' >> .orca/work
 
 | Command | Phase(s) | Purpose |
 |---------|----------|---------|
-| `task-create` | 2, 4 | Create plan tasks and subtasks |
-| `task-list` | 5, 6 | Poll task statuses |
-| `task-update` | 2, 5, 6 | Update task status/results |
-| `dispatch` | 2, 4, 6 | Send task spec to a worker terminal |
-| `gate-create` | 2, 6, 7 | Create a blocking decision gate |
+| `task-create` | 2, 4 | Create plan tasks and per-sub-task tasks |
+| `task-list` | 5, 6 | Poll per-sub-task statuses |
+| `task-update` | 2, 5, 6 | Update per-sub-task status/results |
+| `dispatch` | 2, 4, 5, 6, 11.4, 11.6 | Send task spec to a (freshly spawned) worker terminal |
+| `gate-create` | 2, 6, 7 (per-sub-task) | Create a blocking decision gate (plan review, sub-task PR review, merge-conflict escalation) |
 | `gate-resolve` | 2, 6, 7 | Resolve a pending gate |
 | `ask` | 1, 2, 3, 6, 7, 8 | Blocking question to coordinator (human) |
 | `run --spec <file>` | All | Start the coordinator event loop with a markdown spec |
@@ -1883,17 +1893,28 @@ echo '{"status":"CANCELLED","cancelled_at":"'$(date -Iseconds)'"}' >> .orca/work
 
 | Command | Phase(s) | Purpose |
 |---------|----------|---------|
-| `worktree list` | 4 | Check existing worktrees |
-| `worktree create` | 4 | Create isolated feature worktree |
-| `worktree remove` | 8 | Delete worktree after merge |
+| `worktree list` | 4 | Check existing worktrees (now: per-sub-task entries) |
+| `worktree create` | 4 | **Once per sub-task** — create the isolated worktree for that sub-task's branch |
+| `worktree remove` | 8 | **Once per sub-task** — delete worktree after merge, reverse-topo order |
 
-### 18.3 External Commands Used
+### 18.3 `orca terminal` Commands Used (v2.1.0)
 
 | Command | Phase(s) | Purpose |
 |---------|----------|---------|
-| `git fetch/push/rebase` | 7 | Branch management |
-| `git diff --stat` | 7 | Change summary |
-| `gh pr create/view` | 7 | PR lifecycle |
+| `terminal list` | 4, 5, 8 | Inspect terminal pool + tag matching |
+| `terminal create` | 4, 5, 7, 8 | **Spawn a fresh terminal** for execution / review / fix / autofix / pr-feedback — never reuse across rounds |
+| `terminal close` | 5, 8 | Tear down intermediate terminals (review) after each round; close keep_terminal in Phase 8 |
+
+### 18.4 External Commands Used
+
+| Command | Phase(s) | Purpose |
+|---------|----------|---------|
+| `git fetch/push/rebase/push --force-with-lease` | 7, 11.8 | Per-sub-task branch management + stacked-PR rebase hook |
+| `git diff --stat` | 7 | Per-sub-task change summary |
+| `gh pr create` | 7 | Per-sub-task PR — `--base parent_branch` if stacked, `--draft` if dependent |
+| `gh pr edit --base main` | 11.8 | Flip PR base after parent merges |
+| `gh pr ready` | 11.8 | Promote a draft PR (parent just merged) |
+| `gh pr view` | 7 | Per-sub-task PR lifecycle monitoring |
 | `jq` | All | JSON parsing |
 
 ---
