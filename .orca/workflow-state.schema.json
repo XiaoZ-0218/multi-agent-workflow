@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://orca.app/schemas/workflow-state.json",
   "title": "Workflow State",
-  "description": "Schema for .orca/workflow-state.json — the persistent state file for multi-agent-workflow runs.",
+  "description": "Schema for .orca/workflow-state.json — the persistent state file for multi-agent-workflow runs. v2.1.0 adds per-subtask worktree/branch/PR fields so each sub-task is an isolated, reviewable unit.",
   "type": "object",
   "required": ["workflow_id", "version", "started_at", "current_phase", "current_state"],
   "properties": {
@@ -48,12 +48,12 @@
     },
     "branch": {
       "type": "string",
-      "description": "Feature branch name"
+      "description": "Aggregate: branch name of the root sub-task (no deps), or the first sub-task by topological order. Kept for v2.0.x dashboard compat; prefer tasks.subtasks[*].branch_name."
     },
     "pr_url": {
       "type": "string",
       "format": "uri",
-      "description": "URL of the created pull request"
+      "description": "Aggregate: PR URL of the root sub-task. Kept for v2.0.x dashboard compat; prefer tasks.subtasks[*].pr_url."
     },
     "phases": {
       "type": "object",
@@ -82,16 +82,48 @@
         },
         "subtasks": {
           "type": "array",
+          "description": "One entry per sub-task in the DAG. v2.1.0: each sub-task owns its own worktree, branch, terminals, and PR.",
           "items": {
             "type": "object",
+            "required": ["id", "logical_id", "status"],
             "properties": {
-              "id": { "type": "string" },
-              "logical_id": { "type": "string" },
-              "status": { "type": "string" },
-              "verdict": { "type": "string", "enum": ["PASS", "FAIL", null] },
-              "artifact": { "type": "string" },
-              "reason": { "type": "string" },
-              "retries": { "type": "integer", "minimum": 0 }
+              "id":                    { "type": "string" },
+              "logical_id":            { "type": "string" },
+              "title":                 { "type": "string" },
+              "complexity":            { "type": "string", "enum": ["general", "complex", "image", null] },
+              "deps":                  { "type": "array", "items": { "type": "string" } },
+              "status":                { "type": "string", "enum": ["pending", "dispatched", "running", "completed", "failed", "parked"] },
+              "verdict":               { "type": "string", "enum": ["PASS", "FAIL", null] },
+              "artifact":              { "type": "string" },
+              "reason":                { "type": "string" },
+              "retries":               { "type": "integer", "minimum": 0 },
+              "worktree_path":         { "type": "string", "description": "Absolute path to the sub-task's dedicated worktree (Phase 4)" },
+              "branch_name":           { "type": "string", "description": "feature/<wf>/<sub>-<ts> (Phase 4)" },
+              "base_branch":           { "type": "string", "description": "main if no deps; otherwise parent sub-task's branch_name (stacked branches)" },
+              "terminals": {
+                "type": "array",
+                "description": "Every terminal spawned for this sub-task, oldest first. Intermediate terminals are closed after each round; the keep_terminal stays alive until Phase 8.",
+                "items": {
+                  "type": "object",
+                  "required": ["handle", "role", "round"],
+                  "properties": {
+                    "handle":      { "type": "string" },
+                    "role":        { "type": "string", "enum": ["execution", "review", "fix"] },
+                    "round":       { "type": "integer", "minimum": 0 },
+                    "agent_type":  { "type": "string", "description": "Resolved Agent name (claude / kimi / grok / pi / Plan)" },
+                    "status":      { "type": "string", "enum": ["dispatched", "running", "completed", "failed", "closed"] },
+                    "verdict":     { "type": "string", "enum": ["PASS", "FAIL", null] },
+                    "spawned_at":  { "type": "string", "format": "date-time" },
+                    "closed_at":   { "type": "string", "format": "date-time" }
+                  }
+                }
+              },
+              "keep_terminal":         { "type": "string", "description": "Handle of the terminal that produced the final implementation; torn down in Phase 8." },
+              "pr_url":                { "type": "string", "format": "uri" },
+              "pr_base":               { "type": "string", "description": "PR base branch — main if no deps, otherwise parent sub-task's branch (stacked)" },
+              "pr_state":              { "type": "string", "enum": ["DRAFT", "OPEN", "CHANGES_REQUESTED", "MERGED", "CLOSED", "PARKED", null] },
+              "merged_at":             { "type": "string", "format": "date-time" },
+              "review_rounds":         { "type": "integer", "minimum": 0, "description": "Number of cross-review rounds executed in Phase 5" }
             }
           }
         }
@@ -105,7 +137,8 @@
           "gate": { "type": "string" },
           "result": { "type": "string" },
           "round": { "type": "integer" },
-          "timestamp": { "type": "string", "format": "date-time" }
+          "timestamp": { "type": "string", "format": "date-time" },
+          "subtask_id": { "type": "string", "description": "v2.1.0: scope of the decision — null = workflow-level, otherwise the sub-task it applies to" }
         }
       }
     },
@@ -126,7 +159,8 @@
           "phase": { "type": "string" },
           "severity": { "type": "string", "enum": ["WARN", "ERROR", "FATAL"] },
           "message": { "type": "string" },
-          "timestamp": { "type": "string", "format": "date-time" }
+          "timestamp": { "type": "string", "format": "date-time" },
+          "subtask_id": { "type": "string", "description": "v2.1.0: scope of the error" }
         }
       }
     }
