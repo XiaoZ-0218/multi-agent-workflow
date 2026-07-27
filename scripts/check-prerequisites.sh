@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
-# check-prerequisites.sh — Pre-flight validation for multi-agent-workflow
+# check-prerequisites.sh — Pre-flight validation for multi-agent-workflow v2.2.0
 # Run before starting any workflow to ensure all dependencies are met.
+#
+# v2.2.0 notes:
+# - The coordinator ("主 Agent") runs the entire workflow on the main branch in
+#   its own checkout and never runs `git checkout`; all feature work happens in
+#   ONE shared git worktree + ONE feature branch + ONE PR.
+# - The v2.1.0 worker-terminal count check (ORCA_WORKFLOW_MIN_WORKERS) and the
+#   branch-strategy soft check (ORCA_WORKFLOW_BRANCH_STRATEGY) are REMOVED:
+#   terminal objects have no type/tags fields, and per-subtask worktrees /
+#   stacked branches no longer exist.
 
 set -euo pipefail
 
@@ -17,23 +26,51 @@ pass() { echo -e "${GREEN}✅ PASS${NC}: $1"; PASS=$((PASS + 1)); }
 warn() { echo -e "${YELLOW}⚠️  WARN${NC}: $1"; WARN=$((WARN + 1)); }
 fail() { echo -e "${RED}❌ FAIL${NC}: $1"; FAIL=$((FAIL + 1)); }
 
-echo "=== Multi-Agent Workflow Prerequisites Check ==="
+STRICT_PREREQ="${ORCA_WORKFLOW_STRICT_PREREQ:-false}"
+
+echo "=== Multi-Agent Workflow Prerequisites Check (v2.2.0) ==="
 echo ""
 
 # 1. Orca IDE
 echo "--- Orca IDE ---"
 if command -v orca &>/dev/null; then
   ORCA_STATUS=$(orca status --json 2>/dev/null || echo '{"ok":false}')
-  if echo "$ORCA_STATUS" | jq -e '.ok and .result.app.running' &>/dev/null; then
-    pass "Orca is running (PID: $(echo "$ORCA_STATUS" | jq -r '.result.app.pid'))"
+  if echo "$ORCA_STATUS" | jq -e '.ok and .result.app.running and .result.runtime.reachable' &>/dev/null; then
+    pass "Orca is running and runtime is reachable (PID: $(echo "$ORCA_STATUS" | jq -r '.result.app.pid'))"
   else
-    fail "Orca is installed but not running. Start it with: orca open"
+    fail "Orca is installed but not fully up (need .ok, app.running and runtime.reachable). Start it with: orca open"
   fi
 else
   fail "Orca CLI not found. Install from https://orca.app"
 fi
 
-# 2. Git
+# 2. Orca-managed checkout + current branch
+#    v2.2.0: the coordinator runs the whole workflow from its own checkout on
+#    the main branch (it never runs `git checkout`), so it MUST be inside an
+#    Orca-managed checkout. `orca worktree current --json` fails otherwise.
+echo "--- Coordinator Checkout ---"
+if command -v orca &>/dev/null; then
+  CURRENT_WT=$(orca worktree current --json 2>/dev/null || echo '{"ok":false}')
+  if echo "$CURRENT_WT" | jq -e '.ok and .result.worktree.id' &>/dev/null; then
+    pass "Running inside an Orca-managed checkout (worktree id: $(echo "$CURRENT_WT" | jq -r '.result.worktree.id'))"
+  elif [ "$STRICT_PREREQ" = "true" ]; then
+    fail "Not inside an Orca-managed checkout — the v2.2.0 coordinator must run in one (set ORCA_WORKFLOW_STRICT_PREREQ=false to downgrade to a warning)"
+  else
+    warn "Not inside an Orca-managed checkout — worktree creation in Phase 4 (DISPATCHING) will be unavailable"
+  fi
+else
+  warn "Cannot check the current worktree (Orca CLI not available)"
+fi
+if git rev-parse --git-dir &>/dev/null; then
+  CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+  if [ "$CURRENT_BRANCH" = "main" ]; then
+    pass "Current branch is main — the coordinator stays on main for the entire run"
+  else
+    warn "Current branch is '$CURRENT_BRANCH', not main — the v2.2.0 coordinator should stay on main (feature work happens in the shared feature worktree)"
+  fi
+fi
+
+# 3. Git
 echo "--- Git ---"
 if command -v git &>/dev/null; then
   GIT_VERSION=$(git --version | awk '{print $3}')
@@ -46,7 +83,7 @@ else
   fail "Git not found. Install with: brew install git"
 fi
 
-# 3. GitHub CLI
+# 4. GitHub CLI
 echo "--- GitHub CLI ---"
 if command -v gh &>/dev/null; then
   GH_VERSION=$(gh --version | head -1 | awk '{print $3}')
@@ -63,7 +100,7 @@ else
   fail "GitHub CLI not found. Install with: brew install gh"
 fi
 
-# 4. jq
+# 5. jq
 echo "--- jq ---"
 if command -v jq &>/dev/null; then
   JQ_VERSION=$(jq --version | cut -d- -f2)
@@ -72,58 +109,22 @@ else
   fail "jq not found. Install with: brew install jq"
 fi
 
-# 5. Worker terminals
-#    SKILL.md §3.1 marks this as FATAL by default, but solo / dry-run runs are
-#    legitimately valid without a worker pool. Set ORCA_WORKFLOW_STRICT_PREREQ=true
-#    to enforce the FATAL policy; default is WARN to keep local smoke-tests working.
-#
-#    v2.1.0: each sub-task gets its own first execution terminal in Phase 4,
-#    plus per-round review + fix terminals in Phase 5. A workflow with N
-#    sub-tasks and ~2 review rounds each can need up to 3N terminals
-#    concurrently. ORCA_WORKFLOW_MIN_WORKERS lets ops/CI assert the lower
-#    bound for their expected parallelism (default 1, recommended 3+).
+# 6. Worker terminals (informational only in v2.2.0)
+#    v2.1.0 counted pre-existing worker terminals (ORCA_WORKFLOW_MIN_WORKERS),
+#    but terminal objects have no type/tags fields, so no such count exists.
+#    The coordinator spawns a FRESH terminal for every execution / review /
+#    fix / fallback / autofix / pr-fix / integration-review round itself, so
+#    no pre-created worker pool is required.
 echo "--- Worker Terminals ---"
-STRICT_PREREQ="${ORCA_WORKFLOW_STRICT_PREREQ:-false}"
-MIN_WORKERS="${ORCA_WORKFLOW_MIN_WORKERS:-1}"
-if command -v orca &>/dev/null; then
-  WORKER_COUNT=$(orca terminal list --json 2>/dev/null | jq '[.result.terminals[]? | select(.type == "worker" or .tags[]? == "worker")] | length' 2>/dev/null || echo "0")
-  if [ "$WORKER_COUNT" -ge "$MIN_WORKERS" ]; then
-    pass "$WORKER_COUNT worker terminal(s) available (min requested: $MIN_WORKERS)"
-  elif [ "$WORKER_COUNT" -ge 1 ]; then
-    if [ "$STRICT_PREREQ" = "true" ]; then
-      fail "Only $WORKER_COUNT worker terminal(s) available; need at least $MIN_WORKERS for v2.1.0 sub-task parallelism. Create more: orca terminal create --type worker"
-    else
-      warn "Only $WORKER_COUNT worker terminal(s); ORCA_WORKFLOW_MIN_WORKERS=$MIN_WORKERS — sub-tasks will run more serially than expected. Create more for full parallelism: orca terminal create --type worker"
-    fi
-  else
-    if [ "$STRICT_PREREQ" = "true" ]; then
-      fail "No worker terminals found. Create one: orca terminal create --type worker (set ORCA_WORKFLOW_STRICT_PREREQ=false to allow solo runs)"
-    else
-      warn "No worker terminals found. Solo/dry-run mode still works. Create one for parallel execution: orca terminal create --type worker"
-    fi
-  fi
-else
-  warn "Cannot check worker terminals (Orca not available)"
-fi
+echo -e "ℹ️  INFO: no worker pool needed — the v2.2.0 coordinator creates fresh terminals per round itself (orca terminal create --worktree id:<id> --title \"[<role>:<agent>] ...\")"
 
-# 5b. Branch strategy soft check (v2.1.0)
-#     stacked mode requires per-sub-task worktrees; serial mode falls back
-#     to one worktree at a time. Modern git (>= 2.30) supports multiple
-#     worktrees without issue, so this is informational only.
-echo "--- Branch Strategy ---"
-BRANCH_STRATEGY="${ORCA_WORKFLOW_BRANCH_STRATEGY:-$(jq -r '.workflow.branch_strategy.mode // "stacked"' .orca/workflow-config.json 2>/dev/null || echo "stacked")}"
-case "$BRANCH_STRATEGY" in
-  stacked|serial) pass "branch_strategy=$BRANCH_STRATEGY" ;;
-  *)             fail "Unknown ORCA_WORKFLOW_BRANCH_STRATEGY=$BRANCH_STRATEGY (expected: stacked | serial)" ;;
-esac
-
-# 6. Git working directory
+# 7. Git working directory
 echo "--- Working Directory ---"
 if git rev-parse --git-dir &>/dev/null; then
   if git diff --quiet && git diff --cached --quiet; then
     pass "Working directory is clean"
   else
-    warn "Working directory has uncommitted changes — stash or commit before creating worktrees"
+    warn "Working directory has uncommitted changes — stash or commit before the coordinator starts the run"
   fi
 else
   warn "Not in a git repository — worktree creation will be unavailable"
