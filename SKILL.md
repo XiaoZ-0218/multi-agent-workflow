@@ -315,12 +315,12 @@ export ORCA_WORKFLOW_DRY_RUN="${ORCA_WORKFLOW_DRY_RUN:-false}"
 # === Agent routing (override docs/agent-routing.md — same names as v2.1.0) ===
 export ORCA_WORKFLOW_PLAN_AGENT="${ORCA_WORKFLOW_PLAN_AGENT:-claude}"   # fallback: pi
 export ORCA_WORKFLOW_REVIEW_AGENT="${ORCA_WORKFLOW_REVIEW_AGENT:-pi}"
-export ORCA_WORKFLOW_EXECUTION_AGENT="${ORCA_WORKFLOW_EXECUTION_AGENT:-claude}"
+export ORCA_WORKFLOW_EXECUTION_AGENT="${ORCA_WORKFLOW_EXECUTION_AGENT:-kimi}"   # on error: claude (see fallback chain)
 export ORCA_WORKFLOW_COMPLEX_EXECUTION_AGENT="${ORCA_WORKFLOW_COMPLEX_EXECUTION_AGENT:-kimi}"
 export ORCA_WORKFLOW_IMAGE_AGENT="${ORCA_WORKFLOW_IMAGE_AGENT:-grok}"
 export ORCA_WORKFLOW_FALLBACK_AGENT="${ORCA_WORKFLOW_FALLBACK_AGENT:-pi}"
 # Fallback chain after a generic task failure (comma-separated, highest priority first)
-export ORCA_WORKFLOW_FALLBACK_CHAIN="${ORCA_WORKFLOW_FALLBACK_CHAIN:-grok,pi}"
+export ORCA_WORKFLOW_FALLBACK_CHAIN="${ORCA_WORKFLOW_FALLBACK_CHAIN:-claude,grok,pi}"
 ```
 
 > **Removed in v2.2.0** (no longer read — the per-feature worktree model needs
@@ -365,7 +365,7 @@ export ORCA_WORKFLOW_FALLBACK_CHAIN="${ORCA_WORKFLOW_FALLBACK_CHAIN:-grok,pi}"
       "_note": "Single source of truth: docs/agent-routing.md. These are cold-start defaults only.",
       "plan_agent_type": "claude",
       "review_agent_type": "pi",
-      "execution_agent_type": "claude",
+      "execution_agent_type": "kimi",
       "complex_execution_agent_type": "kimi",
       "image_agent_type": "grok",
       "fallback_agent_type": "pi",
@@ -722,11 +722,12 @@ Each subtask in the plan must declare:
 
 - `"complex"` → `complex_execution_agent_type` (default `kimi`)
 - `"image"` → `image_agent_type` (default `grok`)
-- `"general"` or unset → `execution_agent_type` (default `claude`)
+- `"general"` or unset → `execution_agent_type` (default `kimi`; on error the
+  fallback chain starts with `claude`)
 - review role → `review_agent_type` (default `pi`) — **always ≠ the implementation agent**
 - fix role → same agent as the subtask's implementation agent
 - integration review → `review_agent_type` (reused; default `pi`)
-- generic failure retries → `fallback_chain` (default `grok,pi`)
+- generic failure retries → `fallback_chain` (default `claude,grok,pi`)
 
 `orca terminal create` has **no `--tags` flag** and terminal objects have no
 `type`/`tags` fields. Agent identity is carried by (1) the `--title` prefix
@@ -812,7 +813,7 @@ fallback attempt is a NEW task + a NEW terminal.**
 ```bash
 retry_with_fallback() {
   local sub_id="$1" failed_task_id="$2" round="$3"
-  IFS=',' read -ra agents <<< "${ORCA_WORKFLOW_FALLBACK_CHAIN:-grok,pi}"
+  IFS=',' read -ra agents <<< "${ORCA_WORKFLOW_FALLBACK_CHAIN:-claude,grok,pi}"
 
   local prev_task="$failed_task_id"
   for agent in "${agents[@]}"; do
@@ -905,7 +906,7 @@ Your ownership (owns): {owns_globs}
       "initial_base_sha": "a1b2c3d",
       "keep_terminal": "term_yyy",
       "terminals": [
-        {"handle": "term_yyy", "role": "execution", "round": 0, "agent_type": "claude", "status": "dispatched"}
+        {"handle": "term_yyy", "role": "execution", "round": 0, "agent_type": "kimi", "status": "dispatched"}
       ]
     }
   ],
@@ -1074,9 +1075,9 @@ the fallback chain (§8.4) — each fallback attempt is a NEW task + NEW termina
       "owns": ["src/prefs/**", "docs/prefs.md"],
       "review_rounds": 1,
       "terminals": [
-        {"handle": "term_yyy", "role": "execution", "round": 0, "agent_type": "claude", "status": "completed", "verdict": "PASS"},
+        {"handle": "term_yyy", "role": "execution", "round": 0, "agent_type": "kimi", "status": "completed", "verdict": "PASS"},
         {"handle": "term_rrr", "role": "review", "round": 0, "agent_type": "pi", "status": "closed", "verdict": "FAIL"},
-        {"handle": "term_zzz", "role": "fix", "round": 1, "agent_type": "claude", "status": "completed", "verdict": "PASS"},
+        {"handle": "term_zzz", "role": "fix", "round": 1, "agent_type": "kimi", "status": "completed", "verdict": "PASS"},
         {"handle": "term_sss", "role": "review", "round": 1, "agent_type": "pi", "status": "closed", "verdict": "PASS"}
       ],
       "keep_terminal": "term_zzz"
@@ -1591,9 +1592,9 @@ compat fields are dropped; `current_phase`/`current_state` enums now include
         "initial_base_sha": "a1b2c3d",
         "review_rounds": 1,
         "terminals": [
-          {"handle": "term_yyy", "role": "execution", "round": 0, "agent_type": "claude", "status": "completed", "verdict": "PASS", "spawned_at": "2026-07-27T10:30:00Z", "closed_at": null},
+          {"handle": "term_yyy", "role": "execution", "round": 0, "agent_type": "kimi", "status": "completed", "verdict": "PASS", "spawned_at": "2026-07-27T10:30:00Z", "closed_at": null},
           {"handle": "term_rrr", "role": "review", "round": 0, "agent_type": "pi", "status": "closed", "verdict": "FAIL", "spawned_at": "2026-07-27T10:45:00Z", "closed_at": "2026-07-27T10:52:00Z"},
-          {"handle": "term_zzz", "role": "fix", "round": 1, "agent_type": "claude", "status": "completed", "verdict": "PASS", "spawned_at": "2026-07-27T10:52:00Z", "closed_at": null},
+          {"handle": "term_zzz", "role": "fix", "round": 1, "agent_type": "kimi", "status": "completed", "verdict": "PASS", "spawned_at": "2026-07-27T10:52:00Z", "closed_at": null},
           {"handle": "term_sss", "role": "review", "round": 1, "agent_type": "pi", "status": "closed", "verdict": "PASS", "spawned_at": "2026-07-27T11:05:00Z", "closed_at": "2026-07-27T11:12:00Z"}
         ],
         "keep_terminal": "term_zzz"

@@ -27,8 +27,8 @@
 │   Plan   │ Complex Exec │ General Exec │   Image    │  Review   │
 │ (计划生成)│  (复杂执行)   │  (通用执行)   │ (图片生成)  │  (审查)   │
 ├──────────┼──────────────┼──────────────┼────────────┼───────────┤
-│  claude  │     kimi     │  claude code │    grok    │    pi     │
-│ (pi 备选)│  (kimi --auto)│   (优先)     │            │           │
+│  claude  │     kimi     │     kimi     │    grok    │    pi     │
+│ (pi 备选)│  (kimi --auto)│(报错→claude) │            │           │
 └──────────┴──────────────┴──────────────┴────────────┴───────────┘
 ```
 
@@ -53,7 +53,7 @@ kimi --auto
 
 ---
 
-### 2. 通用执行任务 → claude code（优先）/ grok（次选）
+### 2. 通用执行任务 → kimi（优先）/ claude code（报错切换）
 
 **触发条件**：`complexity = "general"` 或未设置
 
@@ -61,10 +61,10 @@ kimi --auto
 
 | 优先级 | Agent | 说明 |
 |--------|-------|------|
-| 🥇 第一优先 | **claude code** | 默认通用执行 Agent |
-| 🥈 第二优先 | **grok** | claude code 不可用时切换 |
+| 🥇 第一优先 | **kimi** | 默认通用执行 Agent（与复杂执行同家，`kimi --auto`） |
+| 🥈 第二优先 | **claude code** | kimi 报错/不可用时切换（走兜底链，见 §4） |
 
-**配置项**：`routing.execution_agent_type = "claude"`
+**配置项**：`routing.execution_agent_type = "kimi"`
 
 ---
 
@@ -78,15 +78,15 @@ kimi --auto
 
 ---
 
-### 4. 报错兜底 → pi
+### 4. 报错兜底 → claude code → grok → pi
 
-**触发条件**：通用执行任务（claude code / grok）失败时
+**触发条件**：通用执行任务（kimi / claude code）失败时
 
 ```
-claude code 失败 → grok 重试 → pi 补上（分析+修复/标记失败）
+kimi 失败 → claude code 重试 → grok 重试 → pi 补上（分析+修复/标记失败）
 ```
 
-- 不在初始分发时使用，仅在重试耗尽后按兜底链（默认 `grok,pi`）启用
+- 不在初始分发时使用，仅在重试耗尽后按兜底链（默认 `claude,grok,pi`）启用
 - 每次兜底尝试 = **新建 task + 新建终端**（不复用失败 task，避免 Orca 熔断）
 - pi 负责分析前序失败原因，决定是否可修复
 
@@ -184,7 +184,7 @@ orca terminal create \
 | 角色 | Agent 首选 | Agent 备选 | Agent 兜底 | Model |
 |------|-----------|-----------|-----------|-------|
 | **Complex Exec** | kimi | — | — | auto（kimi 自带） |
-| **General Exec** | claude code | grok | pi | 由 Agent 配置决定 |
+| **General Exec** | kimi | claude code | grok → pi | auto（kimi 自带） |
 | **Image** | grok | — | — | 默认 |
 | **Review**（含 integration review） | pi | — | — | 自有模型 |
 | **Plan** | claude code | pi | — | 由 Agent 配置决定 |
@@ -208,7 +208,7 @@ orca terminal create \
 }
 ```
 
-### 通用任务（走 claude code）
+### 通用任务（走 kimi）
 
 ```json
 {
@@ -249,8 +249,8 @@ export ORCA_WORKFLOW_PLAN_AGENT="claude"
 # 复杂执行任务
 export ORCA_WORKFLOW_COMPLEX_EXECUTION_AGENT="kimi"
 
-# 通用执行任务（默认 claude，可改为 grok）
-export ORCA_WORKFLOW_EXECUTION_AGENT="claude"
+# 通用执行任务（默认 kimi，报错切 claude）
+export ORCA_WORKFLOW_EXECUTION_AGENT="kimi"
 
 # 图片生成
 export ORCA_WORKFLOW_IMAGE_AGENT="grok"
@@ -262,7 +262,7 @@ export ORCA_WORKFLOW_REVIEW_AGENT="pi"
 export ORCA_WORKFLOW_FALLBACK_AGENT="pi"
 
 # 通用任务失败后的重试链（逗号分隔，优先级从高到低）
-export ORCA_WORKFLOW_FALLBACK_CHAIN="grok,pi"
+export ORCA_WORKFLOW_FALLBACK_CHAIN="claude,grok,pi"
 
 # === Model 选择（在创建 terminal 时通过 --command 传入，不在这里） ===
 # 参见上方「二、Model 选择」章节

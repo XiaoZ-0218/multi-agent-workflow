@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.2.1] — 2026-07-27
 
 ### Changed
+- **General execution routing**: the default execution agent is now
+  **kimi** (was claude code); on error the retry switches to claude code.
+  `ORCA_WORKFLOW_EXECUTION_AGENT` and `routing.execution_agent_type`
+  change `claude` → `kimi`, and `ORCA_WORKFLOW_FALLBACK_CHAIN` changes
+  `grok,pi` → `claude,grok,pi`. Single source of truth:
+  `docs/agent-routing.md` §2/§4.
 - **Plan agent routing**: plan generation (Phase 2) now routes to
   **claude code** (preferred) with **pi** as fallback, replacing the Orca
   built-in `Plan` agent. `ORCA_WORKFLOW_PLAN_AGENT` and the cold-start

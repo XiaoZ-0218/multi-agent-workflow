@@ -20,7 +20,7 @@
       "_note": "Agent 选型详见 docs/agent-routing.md（单一起源）。本文件保留默认值便于冷启动和 CI 校验，运行时该文件被 docs/agent-routing.md 的偏好覆盖。",
       "plan_agent_type": "claude",
       "review_agent_type": "pi",
-      "execution_agent_type": "claude",
+      "execution_agent_type": "kimi",
       "complex_execution_agent_type": "kimi",
       "image_agent_type": "grok",
       "fallback_agent_type": "pi",

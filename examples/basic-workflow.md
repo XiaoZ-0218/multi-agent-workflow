@@ -75,7 +75,7 @@ wave 1 (after sub-1 PASS):  sub-2   owns: web/src/settings/**
 ```
 
 Agent routing for this run (defaults): plan = `claude` (fallback `pi`), review = `pi`,
-execution = `claude`, fallback chain = `grok,pi`. Cross-review rule: the
+execution = `kimi`, fallback chain = `claude,grok,pi`. Cross-review rule: the
 review agent is never the implementation agent. Limits (defaults):
 `ORCA_WORKFLOW_MAX_REVIEW_ROUNDS=3`, `ORCA_WORKFLOW_MAX_ESCALATE=2`,
 `ORCA_WORKFLOW_MAX_USER_CONFIRM=3`, `ORCA_WORKFLOW_MAX_SUB_RETRY=3`,
@@ -275,8 +275,8 @@ SUB1_BASE=$(cd "$WT_PATH" && git rev-parse HEAD)   # 9f02c1ab… (== origin/main
 
 EXEC_S1=$(orca terminal create \
   --worktree "id:$WT_ID" \
-  --title "[execution:claude] sub-1 r0 prefs-api" \
-  --command "claude" \
+  --title "[execution:kimi] sub-1 r0 prefs-api" \
+  --command "kimi --auto" \
   --json | jq -r '.result.terminal.handle')            # → term_s1e0
 
 SUB1_TASK=$(orca orchestration task-create \
@@ -341,7 +341,7 @@ State after Phase 4 (`.orca/workflow-state.json`):
         "initial_base_sha": "9f02c1ab3d9e4a0f7c2b1e5d8a6f4c3b2a19087f",
         "review_rounds": 0,
         "terminals": [
-          { "handle": "term_s1e0", "role": "execution", "round": 0, "agent_type": "claude", "status": "running", "verdict": null, "spawned_at": "2026-07-27T10:52:00Z", "closed_at": null }
+          { "handle": "term_s1e0", "role": "execution", "round": 0, "agent_type": "kimi", "status": "running", "verdict": null, "spawned_at": "2026-07-27T10:52:00Z", "closed_at": null }
         ],
         "keep_terminal": null
       },
@@ -380,18 +380,18 @@ Rounds are numbered `0..ORCA_WORKFLOW_MAX_SUB_RETRY` (0..3 = 1 initial
 attempt + ≤3 retries). Every round = execution/fix on a **fresh terminal via
 a NEW task** (chained with `--parent`; never re-dispatch the same task — Orca
 circuit-breaks a task after 3 consecutive failures), then cross-review on
-**another fresh terminal** with the review agent (`pi` ≠ `claude`). While
+**another fresh terminal** with the review agent (`pi` ≠ `kimi`). While
 waiting, the coordinator runs `orca orchestration check --wait ...` in a
 rolling loop; a timeout just means "peek at `task-list` and the worker
 terminals for liveness, then wait again." Subtask wall-clock timeouts are
 enforced by the coordinator itself (`task-update --status failed` +
 `orca terminal close --terminal <handle>`), and a failed execution may be
-retried via the fallback chain (`grok,pi`) — each fallback attempt is also a
+retried via the fallback chain (`claude,grok,pi`) — each fallback attempt is also a
 NEW task + NEW terminal. Neither happens in this run.
 
 ### Wave 0 — sub-1 (prefs-api)
 
-**Round 0 — execution.** `claude` on `term_s1e0` implements the API in three
+**Round 0 — execution.** `kimi` on `term_s1e0` implements the API in three
 small commits (`9f02c1ab..41d8e77c`), sends `worker_done` once, idles.
 
 **Round 0 — cross-review** on a fresh `pi` terminal, restricted to the
@@ -434,8 +434,8 @@ SUB1_BASE=$(cd "$WT_PATH" && git rev-parse HEAD)   # 41d8e77c… — overwrite s
 
 FIX_S1=$(orca terminal create \
   --worktree "id:$WT_ID" \
-  --title "[fix:claude] sub-1 r1 prefs-api" \
-  --command "claude" \
+  --title "[fix:kimi] sub-1 r1 prefs-api" \
+  --command "kimi --auto" \
   --json | jq -r '.result.terminal.handle')              # → term_s1e1
 
 SUB1_FIX=$(orca orchestration task-create \
@@ -478,8 +478,8 @@ SUB2_BASE=$(cd "$WT_PATH" && git rev-parse HEAD)   # c3b55d9e… — sub-2's fir
 
 EXEC_S2=$(orca terminal create \
   --worktree "id:$WT_ID" \
-  --title "[execution:claude] sub-2 r0 prefs-ui" \
-  --command "claude" \
+  --title "[execution:kimi] sub-2 r0 prefs-ui" \
+  --command "kimi --auto" \
   --json | jq -r '.result.terminal.handle')            # → term_s2e0
 
 SUB2_TASK=$(orca orchestration task-create \
@@ -515,14 +515,14 @@ attempt. `sub-2`: verdict=PASS, review_rounds=1, keep_terminal=`term_s2e0`.
 |--------|-------|------|-------|-------|---------|------|
 | `term_plan` | Planning | plan | — | claude | plan delivered | closed after review |
 | `term_prev` | Planning | review | 1 | pi | PASS | closed |
-| `term_s1e0` | sub-1 | execution | 0 | claude | done | closed (superseded by r1) |
+| `term_s1e0` | sub-1 | execution | 0 | kimi | done | closed (superseded by r1) |
 | `term_s1r0` | sub-1 | review | 0 | pi | FAIL | closed |
-| `term_s1e1` | sub-1 | fix | 1 | claude | done | **keep_terminal** → closed in Phase 8 |
+| `term_s1e1` | sub-1 | fix | 1 | kimi | done | **keep_terminal** → closed in Phase 8 |
 | `term_s1r1` | sub-1 | review | 1 | pi | PASS | closed |
-| `term_s2e0` | sub-2 | execution | 0 | claude | done | **keep_terminal** → closed in Phase 8 |
+| `term_s2e0` | sub-2 | execution | 0 | kimi | done | **keep_terminal** → closed in Phase 8 |
 | `term_s2r0` | sub-2 | review | 0 | pi | PASS | closed |
 | `term_ir1` | Phase 7 | integration-review | 1 | pi | FAIL | closed |
-| `term_irf` | Phase 7 | fix | 1 | claude | done | closed in Phase 8 |
+| `term_irf` | Phase 7 | fix | 1 | kimi | done | closed in Phase 8 |
 | `term_ir2` | Phase 7 | integration-review | 2 | pi | PASS | closed |
 
 ### State after Phase 5 (excerpt: `tasks.subtasks`)
@@ -544,9 +544,9 @@ attempt. `sub-2`: verdict=PASS, review_rounds=1, keep_terminal=`term_s2e0`.
       "initial_base_sha": "9f02c1ab3d9e4a0f7c2b1e5d8a6f4c3b2a19087f",
       "review_rounds": 2,
       "terminals": [
-        { "handle": "term_s1e0", "role": "execution", "round": 0, "agent_type": "claude", "status": "closed", "verdict": "done", "spawned_at": "2026-07-27T10:52:00Z", "closed_at": "2026-07-27T11:19:00Z" },
+        { "handle": "term_s1e0", "role": "execution", "round": 0, "agent_type": "kimi", "status": "closed", "verdict": "done", "spawned_at": "2026-07-27T10:52:00Z", "closed_at": "2026-07-27T11:19:00Z" },
         { "handle": "term_s1r0", "role": "review", "round": 0, "agent_type": "pi", "status": "closed", "verdict": "FAIL", "spawned_at": "2026-07-27T11:12:00Z", "closed_at": "2026-07-27T11:18:00Z" },
-        { "handle": "term_s1e1", "role": "fix", "round": 1, "agent_type": "claude", "status": "idle", "verdict": "done", "spawned_at": "2026-07-27T11:19:00Z", "closed_at": null },
+        { "handle": "term_s1e1", "role": "fix", "round": 1, "agent_type": "kimi", "status": "idle", "verdict": "done", "spawned_at": "2026-07-27T11:19:00Z", "closed_at": null },
         { "handle": "term_s1r1", "role": "review", "round": 1, "agent_type": "pi", "status": "closed", "verdict": "PASS", "spawned_at": "2026-07-27T11:31:00Z", "closed_at": "2026-07-27T11:37:00Z" }
       ],
       "keep_terminal": "term_s1e1"
@@ -565,7 +565,7 @@ attempt. `sub-2`: verdict=PASS, review_rounds=1, keep_terminal=`term_s2e0`.
       "initial_base_sha": "c3b55d9e8a4f2c6071b3d5e7f9a1c3e5b7d9f1a3",
       "review_rounds": 1,
       "terminals": [
-        { "handle": "term_s2e0", "role": "execution", "round": 0, "agent_type": "claude", "status": "idle", "verdict": "done", "spawned_at": "2026-07-27T11:38:00Z", "closed_at": null },
+        { "handle": "term_s2e0", "role": "execution", "round": 0, "agent_type": "kimi", "status": "idle", "verdict": "done", "spawned_at": "2026-07-27T11:38:00Z", "closed_at": null },
         { "handle": "term_s2r0", "role": "review", "round": 0, "agent_type": "pi", "status": "closed", "verdict": "PASS", "spawned_at": "2026-07-27T11:52:00Z", "closed_at": "2026-07-27T11:58:00Z" }
       ],
       "keep_terminal": "term_s2e0"
@@ -657,8 +657,8 @@ A FRESH fix terminal applies the findings and commits (round 1 fix):
 ```bash
 IRFIX=$(orca terminal create \
   --worktree "id:$WT_ID" \
-  --title "[fix:claude] integration fix r1" \
-  --command "claude" \
+  --title "[fix:kimi] integration fix r1" \
+  --command "kimi --auto" \
   --json | jq -r '.result.terminal.handle')                # → term_irf
 
 IRFIX_TASK=$(orca orchestration task-create \
