@@ -28,29 +28,6 @@ applyTo: "**/*"
 
 ---
 
-## Table of Contents
-
-1. [Architecture Overview](#1-architecture-overview)
-2. [State Machine](#2-state-machine)
-3. [Prerequisites & Environment](#3-prerequisites--environment)
-4. [Configuration](#4-configuration)
-5. [Phase 1 — Requirements Gathering](#5-phase-1--requirements-gathering)
-6. [Phase 2 — Plan Generation & Review](#6-phase-2--plan-generation--review)
-7. [Phase 3 — User Confirmation](#7-phase-3--user-confirmation)
-8. [Phase 4 — Task Decomposition & Dispatch](#8-phase-4--task-decomposition--dispatch)
-9. [Phase 5 — Parallel Execution & Sub-Review](#9-phase-5--parallel-execution--sub-review)
-10. [Phase 6 — Aggregation & Decision](#10-phase-6--aggregation--decision)
-11. [Phase 7 — Merge & Pull Request](#11-phase-7--merge--pull-request)
-12. [Phase 8 — Cleanup & Archival](#12-phase-8--cleanup--archival)
-13. [Observability & Logging](#13-observability--logging)
-14. [Error Recovery Matrix](#14-error-recovery-matrix)
-15. [Security & Permission Model](#15-security--permission-model)
-16. [Testing & Validation](#16-testing--validation)
-17. [Operational Runbooks](#17-operational-runbooks)
-18. [API Command Reference](#18-api-command-reference)
-
----
-
 ## 1. Architecture Overview
 
 The coordinator **stays on the main branch for the entire run**. It never runs
@@ -96,23 +73,6 @@ in **one** feature worktree created in Phase 4.
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-### v2.2.0 — What's Different from v2.1.0
-
-| Aspect | v2.1.0 | v2.2.0 |
-|--------|--------|--------|
-| Worktree | One per sub-task | **One per feature**: `feature/<slug>` based on `origin/main`; subtasks share it |
-| Branches | Stacked — dependents branch off parent tips | **One feature branch**; dependencies mean serial waves, not stacked branches |
-| PRs | One per sub-task; dependents start as draft | **One PR** for the whole feature, created at the end |
-| Stacked-PR rebase hook (v2.1.0 §11.8) | Present | **Removed** — no stacked PRs exist to rebase |
-| Parallelism safety | Filesystem isolation (one `git worktree` per sub-task) | **`owns` path globs** per subtask + disjointness validation at plan review; coordinator verifies `git status`/`git diff` after every round |
-| Dispatch | All sub-tasks created up front in topo order | **Wave dispatch**: a subtask runs only after ALL its parents have `verdict=PASS`, seeing their committed code in the shared worktree |
-| Review scope | Latest files in the sub-task's worktree | **`git diff <base_sha>..HEAD`** limited to the subtask's `owns`; execution/fix agents commit in small commits |
-| Pre-PR quality gate | — | **NEW: integration review** — a fresh review-agent terminal reviews the whole feature (`plan + verdicts + tests + git diff origin/main...HEAD`) before `gh pr create`, ≤ 2 rounds |
-| Branch/path templates | `ORCA_WORKFLOW_BRANCH_STRATEGY`, `ORCA_WORKFLOW_BRANCH_TEMPLATE`, `ORCA_WORKFLOW_WORKTREE_PATH_TEMPLATE` | **Removed** — the branch is always `feature/<slug>`; the worktree path comes from `orca worktree create`'s JSON result |
-| Config vars | `ORCA_WORKFLOW_MAX_TERMINALS_PER_SUBTASK`, `ORCA_WORKFLOW_MIN_WORKERS` | **Removed**; **added** `ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW=2` |
-| Coordinator git | `git checkout main` during cleanup | **Never checks out** — `git fetch origin` only |
-| Kept | — | Fresh terminal per round, cross-agent review (reviewer ≠ implementer), hard caps on every loop, collect-all-then-decide, park/degrade exits |
-
 ### Design Principles
 
 | Principle | Implementation |
@@ -139,78 +99,15 @@ gives `MERGING` explicit sub-steps (rebase → autofix → tests → integration
 review → PR monitor), and makes `PARKED` a **feature-level** state (the whole
 feature is parked, never an individual subtask).
 
-```
-                    ┌─────────┐
-                    │  INIT   │
-                    └────┬────┘
-                         ▼
-                  ┌───────────┐          ┌──────────────┐
-                  │ GATHERING │          │ TERMINATED   │
-                  │ (Phase 1) │          │ (any phase)  │
-                  └─────┬─────┘          └──────────────┘
-                        ▼
-                  ┌───────────┐  review FAIL ≤3 rounds / escalate ≤2
-                  │ PLANNING  │◄──────────────────────────┐
-                  │ (Phase 2) │                           │
-                  └─────┬─────┘                           │
-                        ▼ review PASS (worker_done)       │
-                  ┌───────────┐   Revise ─────────────────┘
-                  │CONFIRMING │   Abort (any round) ──► TERMINATED (immediate)
-                  │ (Phase 3) │
-                  └─────┬─────┘   Approve
-                        ▼
-                  ┌────────────┐
-                  │DISPATCHING │ fetch origin main → create ONE worktree
-                  │ (Phase 4)  │ → decompose DAG → dispatch wave 0
-                  └─────┬──────┘◄─────────────┐
-                        ▼                     │
-            ┌───────────────────────────┐     │
-            │ EXECUTING (wave-based)    │     │
-            │  wave k: subtasks whose   │     │
-            │  parents all PASS run in  │     │
-            │  parallel (disjoint owns) │     │
-            │  per subtask:             │     │
-            │   rounds 0..MAX_SUB_RETRY │     │
-            │   exec/fix → cross-review │     │
-            │   PASS → done             │     │
-            │   final-round FAIL →      │     │
-            │   verdict=FAIL (siblings  │     │
-            │   continue)               │     │
-            └─────────────┬─────────────┘     │
-                          ▼ all verdicts in   │
-                  ┌───────────┐               │
-                  │ DECIDING  │ all PASS ────────────────► MERGING
-                  │ (Phase 6) │ retry failed only ────────┘
-                  │           │   (global_retries_used < 2 checked BEFORE increment)
-                  │           │ degrade: revert failed commit ranges ──► MERGING
-                  │           │   └─ revert unclean ──► PARKED (whole feature)
-                  │           │ abort ──► TERMINATED
-                  └───────────┘
-                        ▼
-            ┌──────────────────────────────────┐
-            │ MERGING (Phase 7, feature-level) │
-            │  rebase origin/main              │
-            │  autofix ≤2 ── exhausted ──► human: manual resolve / PARKED
-            │  run tests (record results)      │
-            │  integration review ≤2 ── exhausted ──► human: release / PARKED
-            │  gh pr create → poll every 60s   │
-            │  MERGED ──► CLEANING             │
-            │  CLOSED ──► PARKED               │
-            └─────────────┬────────────────────┘
-                          ▼
-                  ┌───────────┐   MERGED ──► DONE
-                  │ CLEANING  │   PARKED ──► manifest written,
-                  │ (Phase 8) │              worktree+branch kept
-                  └───────────┘
-```
+`INIT → GATHERING → PLANNING → CONFIRMING → DISPATCHING → EXECUTING ⇄ DECIDING → MERGING → CLEANING → DONE` — `PARKED` and `TERMINATED` are side exits reachable from several states (see the transition table).
 
 ### State Transition Table
 
-The authoritative state transition table lives in
-[`docs/workflow.md`](./docs/workflow.md) (状态流转表). It covers every
-transition in the diagram above — including the MERGING sub-steps, the
-PARKED exits, and fatal-error termination — and is the single source of
-truth for guards and triggers.
+The full Mermaid diagram and the authoritative state transition table live in
+[`docs/workflow.md`](./docs/workflow.md) (状态流转表). They cover every
+transition — including the MERGING sub-steps, the PARKED exits, and
+fatal-error termination — and are the single source of truth for guards and
+triggers.
 
 ---
 
@@ -218,32 +115,13 @@ truth for guards and triggers.
 
 ### 3.1 Runtime Checks
 
-```bash
-# 1. Verify Orca is running and reachable
-orca status --json | jq -e '.ok and .result.app.running and .result.runtime.reachable' \
-  || { echo "FATAL: Orca is not running or unreachable"; exit 1; }
-
-# 2. Verify the coordinator is inside an Orca-managed checkout (NEW in v2.2.0)
-#    The coordinator lives in the main checkout for the whole run; the feature
-#    worktree is created later by `orca worktree create`.
-orca worktree current --json | jq -e '.result.worktree.id' >/dev/null \
-  || { echo "FATAL: coordinator is not inside an Orca-managed checkout"; exit 1; }
-
-#    Warn if the coordinator's checkout is not on main — it must stay on main.
-CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-if [ "$CURRENT_BRANCH" != "main" ]; then
-  echo "WARN: current branch is '$CURRENT_BRANCH', expected 'main' — the coordinator never checks out; start from main."
-fi
-
-# 3. Verify required tools
-for tool in git gh jq; do
-  command -v "$tool" >/dev/null || { echo "FATAL: $tool not found"; exit 1; }
-done
-
-# 4. Verify the main checkout is clean (WARN only — feature work happens elsewhere)
-git diff --quiet && git diff --cached --quiet \
-  || { echo "WARN: Working directory has uncommitted changes. Stash or commit before proceeding."; }
-```
+Run `scripts/check-prerequisites.sh` before every run. It checks: Orca
+running & reachable; the coordinator is inside an Orca-managed checkout
+(`orca worktree current`) and on the `main` branch; required tools `git` ≥
+2.30, `gh` ≥ 2.0 (authenticated), `jq`; and a clean working tree. Missing
+hard requirements fail the run; checkout/branch/clean-tree problems warn
+(`ORCA_WORKFLOW_STRICT_PREREQ=true` escalates the Orca-checkout check to a
+hard failure).
 
 > **Deleted in v2.2.0: the worker-terminal count check.** Terminal objects have
 > no `type`/`tags` fields and `orca terminal create` has no `--tags` flag, so a
@@ -261,39 +139,10 @@ git diff --quiet && git diff --cached --quiet \
 | GitHub CLI | ≥ 2.0 | `gh --version` | PR creation & management |
 | jq | ≥ 1.6 | `jq --version` | JSON parsing + atomic state writes |
 
-### 3.3 Environment Variables
-
-> Agent routing variables (`ORCA_WORKFLOW_*_AGENT`, `ORCA_WORKFLOW_FALLBACK_CHAIN`)
-> are defined in [`docs/agent-routing.md`](./docs/agent-routing.md) — the single
-> source of truth for routing, including precedence and the fallback chain.
-
-```bash
-# === Limits (override workflow.limits.*) ===
-export ORCA_WORKFLOW_MAX_REVIEW_ROUNDS=${ORCA_WORKFLOW_MAX_REVIEW_ROUNDS:-3}
-export ORCA_WORKFLOW_MAX_ESCALATE=${ORCA_WORKFLOW_MAX_ESCALATE:-2}
-export ORCA_WORKFLOW_MAX_USER_CONFIRM=${ORCA_WORKFLOW_MAX_USER_CONFIRM:-3}
-export ORCA_WORKFLOW_MAX_SUB_RETRY=${ORCA_WORKFLOW_MAX_SUB_RETRY:-3}
-export ORCA_WORKFLOW_MAX_GLOBAL_RETRY=${ORCA_WORKFLOW_MAX_GLOBAL_RETRY:-2}
-export ORCA_WORKFLOW_MAX_AUTOFIX=${ORCA_WORKFLOW_MAX_AUTOFIX:-2}
-export ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW=${ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW:-2}   # NEW in v2.2.0
-
-# === Paths & logging ===
-export ORCA_WORKFLOW_STATE_FILE="${ORCA_WORKFLOW_STATE_FILE:-.orca/workflow-state.json}"
-export ORCA_WORKFLOW_LOG_LEVEL="${ORCA_WORKFLOW_LOG_LEVEL:-INFO}"
-
-# === Behaviour switches ===
-# true  → scripts/check-prerequisites.sh fails hard when a prerequisite is missing
-#         (recommended for production / CI)
-# false → WARN and continue (default for local dev and smoke tests)
-export ORCA_WORKFLOW_STRICT_PREREQ="${ORCA_WORKFLOW_STRICT_PREREQ:-false}"
-export ORCA_WORKFLOW_DRY_RUN="${ORCA_WORKFLOW_DRY_RUN:-false}"
-```
-
-> **Removed in v2.2.0** (no longer read — the per-feature worktree model needs
-> no branch/path templates, and terminal counts are not pre-flight checked):
-> `ORCA_WORKFLOW_BRANCH_STRATEGY`, `ORCA_WORKFLOW_BRANCH_TEMPLATE`,
-> `ORCA_WORKFLOW_WORKTREE_PATH_TEMPLATE`,
-> `ORCA_WORKFLOW_MAX_TERMINALS_PER_SUBTASK`, `ORCA_WORKFLOW_MIN_WORKERS`.
+Environment variables are defined in §4.1 below. Agent routing variables
+(`ORCA_WORKFLOW_*_AGENT`, `ORCA_WORKFLOW_FALLBACK_CHAIN`) are defined in
+[`docs/agent-routing.md`](./docs/agent-routing.md) — the single source of
+truth for routing, including precedence and the fallback chain.
 
 ---
 
@@ -355,6 +204,26 @@ export ORCA_WORKFLOW_DRY_RUN="${ORCA_WORKFLOW_DRY_RUN:-false}"
     }
   }
 }
+```
+
+Environment variables override the config keys above (highest precedence,
+§4.2). Each variable is defined only here:
+
+```bash
+# VAR → config key
+export ORCA_WORKFLOW_MAX_REVIEW_ROUNDS=3        # limits.max_review_rounds
+export ORCA_WORKFLOW_MAX_ESCALATE=2             # limits.max_escalate_count
+export ORCA_WORKFLOW_MAX_USER_CONFIRM=3         # limits.max_user_confirm_rounds
+export ORCA_WORKFLOW_MAX_SUB_RETRY=3            # limits.max_subtask_retries
+export ORCA_WORKFLOW_MAX_GLOBAL_RETRY=2         # limits.max_global_retries
+export ORCA_WORKFLOW_MAX_AUTOFIX=2              # limits.max_autofix_attempts
+export ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW=2   # limits.max_integration_review_rounds
+export ORCA_WORKFLOW_STATE_FILE=.orca/workflow-state.json  # observability.state_file
+export ORCA_WORKFLOW_LOG_LEVEL=INFO             # observability.log_level
+
+# Env-only switches (no config key)
+export ORCA_WORKFLOW_STRICT_PREREQ=false  # true → check-prerequisites.sh fails hard on a missing prerequisite (recommended for CI)
+export ORCA_WORKFLOW_DRY_RUN=false        # true → plan only, no dispatch (see references/runbooks.md)
 ```
 
 ### 4.2 Configuration File Resolution
