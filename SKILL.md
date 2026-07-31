@@ -416,7 +416,7 @@ The workflow looks for configuration in this order (first wins):
 The coordinator talks to the user through its **own native user-interaction
 channel** (the chat surface it was invoked on). It must **never** use
 `orca orchestration ask --to coordinator` — that channel is reserved for
-**worker → coordinator** messages (§18.1).
+**worker → coordinator** messages (see references/api-reference.md §18.1).
 
 ```
 clarification_round = 0
@@ -493,7 +493,8 @@ Key rules:
 - The review is a **separate review task** dispatched to the **review agent**
   (default `pi`) on its own fresh terminal. The verdict arrives via
   **`worker_done`** — do **NOT** use `gate-create` for agent reviews.
-  `gate-create` is reserved for coordinator-managed DAG decisions (§18.1).
+  `gate-create` is reserved for coordinator-managed DAG decisions (see
+  references/api-reference.md §18.1).
 - The plan artifact is passed **as text** (task result / `worker_done` body).
   It is **never written as a file into the main checkout** — the coordinator's
   checkout stays clean.
@@ -1536,106 +1537,9 @@ echo "🎉 Workflow complete — $DELIVERY_REPORT"
 
 ## 13. Observability & Logging
 
-### 13.1 Workflow State File
-
-A single JSON file at `.orca/workflow-state.json` tracks the entire run. All
-writes are jq atomic writes (§12.4). v2.1.0's aggregate `branch`/`pr_url`
-compat fields are dropped; `current_phase`/`current_state` enums now include
-`INIT`; `pr.state ∈ {OPEN, CHANGES_REQUESTED, MERGED, CLOSED, PARKED, null}`
-(no DRAFT — v2.2.0 never creates draft PRs).
-
-```json
-{
-  "workflow_id": "wf_20260727_001",
-  "version": "2.2.0",
-  "started_at": "2026-07-27T10:00:00Z",
-  "current_phase": "EXECUTING",
-  "current_state": "EXECUTING",
-  "termination_reason": null,
-  "delivery_mode": null,
-  "feature_slug": "add-user-prefs",
-  "worktree": {
-    "id": "wt_abc123",
-    "path": "../add-user-prefs",
-    "branch_name": "feature/add-user-prefs",
-    "base_branch": "origin/main"
-  },
-  "pr": {
-    "url": null,
-    "state": null,
-    "merged_at": null
-  },
-  "phases": {
-    "GATHERING": {"status": "complete", "entered_at": "2026-07-27T10:00:00Z", "exited_at": "2026-07-27T10:05:00Z", "clarification_rounds": 2},
-    "PLANNING": {"status": "complete", "entered_at": "2026-07-27T10:05:00Z", "exited_at": "2026-07-27T10:15:00Z", "review_rounds": 2, "escalate_count": 0},
-    "CONFIRMING": {"status": "complete", "entered_at": "2026-07-27T10:15:00Z", "exited_at": "2026-07-27T10:20:00Z", "user_decision": "APPROVE"},
-    "DISPATCHING": {"status": "complete", "entered_at": "2026-07-27T10:20:00Z", "exited_at": "2026-07-27T10:30:00Z", "waves": [["sub-1", "sub-2"], ["sub-3"]]},
-    "EXECUTING": {"status": "in_progress", "entered_at": "2026-07-27T10:30:00Z", "current_wave": 0},
-    "DECIDING": {"status": "pending"},
-    "MERGING": {"status": "pending"},
-    "CLEANING": {"status": "pending"}
-  },
-  "tasks": {
-    "plan": {"id": "task_xxx", "status": "completed", "verdict": "PASS"},
-    "subtasks": [
-      {
-        "id": "task_yyy",
-        "logical_id": "sub-1",
-        "title": "Preferences API",
-        "complexity": "general",
-        "deps": [],
-        "owns": ["src/prefs/**", "docs/prefs.md"],
-        "status": "completed",
-        "verdict": "PASS",
-        "reason": null,
-        "base_sha": "a1b2c3d",
-        "initial_base_sha": "a1b2c3d",
-        "review_rounds": 1,
-        "terminals": [
-          {"handle": "term_yyy", "role": "execution", "round": 0, "agent_type": "kimi", "status": "completed", "verdict": "PASS", "spawned_at": "2026-07-27T10:30:00Z", "closed_at": null},
-          {"handle": "term_rrr", "role": "review", "round": 0, "agent_type": "pi", "status": "closed", "verdict": "FAIL", "spawned_at": "2026-07-27T10:45:00Z", "closed_at": "2026-07-27T10:52:00Z"},
-          {"handle": "term_zzz", "role": "fix", "round": 1, "agent_type": "kimi", "status": "completed", "verdict": "PASS", "spawned_at": "2026-07-27T10:52:00Z", "closed_at": null},
-          {"handle": "term_sss", "role": "review", "round": 1, "agent_type": "pi", "status": "closed", "verdict": "PASS", "spawned_at": "2026-07-27T11:05:00Z", "closed_at": "2026-07-27T11:12:00Z"}
-        ],
-        "keep_terminal": "term_zzz"
-      }
-    ]
-  },
-  "integration_review": {"rounds": 0, "verdict": null},
-  "decisions": [
-    {"phase": "PLANNING", "kind": "plan_review", "result": "PASS", "round": 2, "timestamp": "2026-07-27T10:15:00Z"},
-    {"phase": "CONFIRMING", "kind": "user_confirmation", "result": "APPROVE", "timestamp": "2026-07-27T10:20:00Z"}
-  ],
-  "retry_counts": {"global_retries_used": 0},
-  "errors": []
-}
-```
-
-Terminal `role` enum: `execution` | `review` | `fix` | `fallback` | `autofix` |
-`pr-fix` | `integration-review`.
-
-### 13.2 Log Levels
-
-| Level | When to Use |
-|-------|------------|
-| `DEBUG` | Every task creation, dispatch, poll iteration, `check --wait` timeout checkpoint |
-| `INFO` | Phase transitions, wave dispatch, decisions, normal progress |
-| `WARN` | Retries triggered, clarifications needed, owns violations reverted, timeouts |
-| `ERROR` | Task failures, conflict detection, integration-review FAIL, escalate triggers |
-| `FATAL` | Orca connectivity loss, unrecoverable state corruption |
-
-### 13.3 Key Metrics to Track
-
-- `workflow.total_duration_ms`
-- `workflow.phase_duration_ms{phase="PLANNING"}`
-- `workflow.review_rounds_total` (per-subtask cross-review rounds)
-- `workflow.integration_review_rounds_total` (NEW in v2.2.0)
-- `workflow.escalation_count_total`
-- `workflow.subtask_pass_rate`
-- `workflow.global_retries_used`
-- `workflow.delivery_mode{full|degraded}`
-
-(Stacked-PR metrics from v2.1.0 are dropped — there are no stacked PRs.)
+> Moved to [`references/observability.md`](./references/observability.md) —
+> the workflow state-file example, terminal `role` enum, log levels, and key
+> metrics to track.
 
 ---
 
@@ -1718,210 +1622,23 @@ filesystem:
 
 ## 16. Testing & Validation
 
-### 16.1 Dry-Run Mode
-
-Set `ORCA_WORKFLOW_DRY_RUN=true` to simulate without side effects:
-
-```bash
-export ORCA_WORKFLOW_DRY_RUN=true
-```
-
-In dry-run mode the coordinator **prints every action and skips every
-mutation** — no `worktree create`, no `terminal create`, no `task-create` /
-`dispatch`, no `git push`, no `gh pr create` — **but it still writes the state
-file** with `"dry_run": true` at the top level. State writes are intentional:
-they let tests assert on the phase structure (§16.3) without any real side
-effects.
-
-### 16.2 Phase Validation Checklist
-
-After each phase, validate:
-
-- [ ] **Phase 1**: Clarified requirement is non-empty and has ≥ 3 concrete details
-- [ ] **Phase 2**: Plan artifact (text) captured, review verdict PASS via `worker_done`, owns-disjointness validated
-- [ ] **Phase 3**: User confirmation recorded with timestamp
-- [ ] **Phase 4**: Exactly one worktree recorded in state; subtask deps form a valid DAG; same-wave `owns` disjoint; wave 0 dispatched
-- [ ] **Phase 5**: All dispatched subtasks have verdicts; no writes outside `owns` remain unreverted
-- [ ] **Phase 6**: Decision recorded (retry/degrade/abort); `global_retries_used ≤ 2`
-- [ ] **Phase 7**: Rebase clean (zero `^UU`), tests recorded, integration-review verdict recorded, PR URL valid
-- [ ] **Phase 8**: Worktree removed or parked manifest created; exactly one history line appended
-
-### 16.3 Integration Test Scenario
-
-```bash
-# Test the full workflow with a trivial task, in dry-run mode
-export ORCA_WORKFLOW_DRY_RUN=true
-export ORCA_WORKFLOW_STRICT_PREREQ=false   # allow WARN-only prerequisite checks in CI
-
-cd /path/to/project          # an Orca-managed checkout on main
-./scripts/check-prerequisites.sh
-
-# Describe the task to the coordinator agent in chat (NOT `orca orchestration run`):
-#
-#   "Dry-run smoke test: write a hello-world script hello.py that prints
-#    'Hello, World!'. Python 3.10+, no external dependencies, no tests
-#    required. Acceptance: `python hello.py` exits 0 with stdout 'Hello, World!'."
-#
-# The coordinator walks all 8 phases, printing the actions it WOULD take
-# (worktree create, terminal spawns, dispatches, PR creation) and performing
-# none of them — except the state file.
-
-# Verify the state file was written with the full phase structure
-jq -r '.dry_run' .orca/workflow-state.json
-# Expected: true
-
-jq '.phases | keys' .orca/workflow-state.json
-# Expected: ["CLEANING","CONFIRMING","DECIDING","DISPATCHING","EXECUTING","GATHERING","MERGING","PLANNING"]
-```
+> Moved to [`references/runbooks.md`](./references/runbooks.md) — dry-run
+> mode, the per-phase validation checklist, and the integration test scenario.
 
 ---
 
 ## 17. Operational Runbooks
 
-### 17.1 Starting a New Workflow
-
-```bash
-# 1. Navigate to the project's MAIN checkout (the coordinator never leaves main)
-cd /path/to/project
-
-# 2. Verify prerequisites
-./scripts/check-prerequisites.sh
-
-# 3. Describe the task to the coordinator agent in chat, e.g.:
-#    "Implement user preferences: a REST API for reading/updating prefs and a
-#     settings page that consumes it. Acceptance: …"
-#
-#    Do NOT use `orca orchestration run --spec <file>` — that is Orca's native
-#    single-agent runner, not this workflow (§18.1).
-#
-# The coordinator takes over from Phase 1 and prompts you for clarifications.
-```
-
-### 17.2 Resuming a Parked Workflow
-
-```bash
-# 1. Find the parked manifest
-ls .orca/parked/
-
-# 2. Read the recovery instructions
-cat .orca/parked/add-user-prefs.md
-
-# 3. Follow them — typically:
-cd ../add-user-prefs            # the KEPT feature worktree
-git fetch origin main && git rebase origin/main
-# resolve conflicts if any
-git push --force-with-lease origin feature/add-user-prefs
-
-# 4. Tell the coordinator (chat) to resume the workflow at Phase 7:
-#    it re-runs the integration review (§11.4) and PR monitoring (§11.6)
-```
-
-### 17.3 Recovering from a Crash
-
-```bash
-# 1. Load the saved state
-CURRENT_PHASE=$(jq -r '.current_phase' .orca/workflow-state.json)
-
-# 2. Determine the recovery action by phase
-case "$CURRENT_PHASE" in
-  "INIT"|"GATHERING"|"PLANNING"|"CONFIRMING")
-    echo "Early phase — restarting from the beginning is safe."
-    ;;
-  "DISPATCHING"|"EXECUTING")
-    echo "Mid-flight — reuse the feature worktree if it exists, re-dispatch stragglers."
-    # Worktree existence/resume check (matched by name):
-    orca worktree list --json | jq -r --arg n "$FEATURE_SLUG" \
-      '.result.worktrees[]? | select(.name == $n) | .id'
-    # In-flight tasks:
-    orca orchestration task-list --json | jq '.result.tasks[] | select(.status == "dispatched")'
-    # Subtasks without a verdict → re-dispatch as NEW tasks (never reuse a
-    # failed task id) on FRESH terminals, per §8.3.3.
-    ;;
-  "DECIDING"|"MERGING"|"CLEANING")
-    echo "Late phase — resume from the recorded decision / pr.state."
-    jq '.pr' .orca/workflow-state.json
-    ;;
-esac
-```
-
-### 17.4 Cancelling a Running Workflow
-
-```bash
-# 1. Mark all in-flight tasks as failed
-for TASK_ID in $(orca orchestration task-list --json | jq -r '.result.tasks[] | select(.status == "dispatched") | .id'); do
-  orca orchestration task-update --id "$TASK_ID" --status "failed" \
-    --result '{"verdict":"FAIL","reason":"Workflow cancelled by user"}'
-done
-
-# 2. Persist the cancellation with a jq ATOMIC WRITE — never append JSON with >>
-TMP=$(mktemp .workflow-state.XXXXXX)
-jq --arg ts "$(date -Iseconds)" \
-  '.current_state = "TERMINATED" | .termination_reason = "cancelled by user" | .terminated_at = $ts' \
-  .orca/workflow-state.json > "$TMP" && mv "$TMP" .orca/workflow-state.json
-
-# 3. Close any remaining workflow terminals
-orca terminal list --json | jq -r '.result.terminals[].handle' | while read -r H; do
-  orca terminal close --terminal "$H" --json 2>/dev/null || true
-done
-```
+> Moved to [`references/runbooks.md`](./references/runbooks.md) — starting,
+> resuming (parked), crash-recovery, and cancelling runbooks.
 
 ---
 
 ## 18. API Command Reference
 
-This is the **verified** Orca CLI surface on this machine — flags not listed
-here do not exist. In particular: `orca terminal create` has **no `--tags`**,
-`orca terminal close` uses **`--terminal`** (not `--handle`), `orca worktree
-create` takes **no positional path arg and no `--base`**, `orca orchestration
-dispatch` has **no `--spec`**, and `orca worktree remove` does not exist (use
-`orca worktree rm`).
-
-### 18.1 `orca orchestration` Commands Used
-
-| Command | Phase(s) | Purpose |
-|---------|----------|---------|
-| `task-create --spec <text> [--task-title] [--display-name] [--deps <json_array>] [--parent <task_id>] --json` | 2, 4, 5, 7 | Create plan/review/subtask/fix/autofix/integration-review tasks; `--parent` chains rounds |
-| `dispatch --task <id> --to <handle> [--inject] --json` | 2, 4, 5, 7 | Send a task to a fresh terminal. **No `--spec`** — new instructions require a NEW task |
-| `check --wait --types worker_done,escalation,decision_gate --timeout-ms <n> --json` | 2, 5, 7 | Block for worker events; returns ONE message at a time — drain queued events before heavy local work; timeout = checkpoint, keep rolling (long tasks take 15–60 min; keep `<n>` ≤ 300000) |
-| `task-list [--status] [--ready] [--brief] --json` | 5, 6, recovery | Poll statuses; liveness check after `check` timeouts; find stragglers (`--brief` caps echoed specs at 160 chars) |
-| `dispatch-show --task <id> --json` | 5, recovery | Checkpoint liveness: dispatch status + `last_heartbeat_at` (fresh heartbeat = alive, NOT done) |
-| `task-update --id <id> --status <pending\|ready\|dispatched\|completed\|failed\|blocked> [--result <json>]` | recovery ONLY | A valid `worker_done` auto-completes task+dispatch — never follow one with `task-update completed`. Manual updates are for timeouts/cancellations/overrides |
-| `gate-create --task <id> --question <text> [--options <json_array>]` | coordinator-managed DAG decisions ONLY | Every gate must name who resolves it. **Never** for agent reviews (use a review task + `worker_done`); **never** inside the PR poll loop |
-| `ask --to <coordinator_handle>` | worker → coordinator ONLY | Workers escalate to the coordinator. The coordinator asks the USER via its **native** channel |
-| `run --spec <text>` | — | Orca's **native single-agent runner** — listed for completeness; this workflow is started by describing the task to the coordinator in chat (§17.1) |
-
-### 18.2 `orca worktree` Commands Used
-
-| Command | Phase(s) | Purpose |
-|---------|----------|---------|
-| `worktree current --json` → `.result.worktree.id` | 3 | Prereq: coordinator must be inside an Orca-managed checkout |
-| `worktree list --json` | 4, recovery | Existence/resume check, matched by name |
-| `worktree create --name "<slug>" --base-branch origin/main --json` | 4 | Create the ONE feature worktree (branch `feature/<slug>`). Read id/path from the JSON result — exact field names should be confirmed on first live run |
-| `worktree rm --worktree id:<id> --force --json` | 8 | Remove the feature worktree after merge |
-
-### 18.3 `orca terminal` Commands Used
-
-| Command | Phase(s) | Purpose |
-|---------|----------|---------|
-| `terminal list --json` → `.result.terminals[]` fields: `handle,title,worktreeId,worktreePath,branch,connected,writable,…` | 5, 8, recovery | Liveness inspection; no `type`/`tags` fields exist |
-| `terminal create --worktree id:<id> --title "[<role>:<agent>] …" --command "<agent cli>" --json` | 2, 4, 5, 7 | Spawn a FRESH terminal for every round of every role. Selectors: `id:`/`name:`/`path:`/`branch:`/`active`. No `--tags` |
-| `terminal wait --terminal <handle> --for tui-idle --timeout-ms <n> --json` | 2, 4, 5, 7 | **Mandatory after every `terminal create`, before `dispatch --inject`** (60s timeout) — a still-booting agent can lose the injected preamble. Also a short-timeout liveness probe at checkpoints |
-| `terminal read --terminal <handle> --json` | 5, recovery | Checkpoint inspection: idle vs still-working; collect results when a worker forgot `worker_done` |
-| `terminal close --terminal <handle> --json` | 5, 7, 8 | Tear down review terminals after each round; close keep_terminal(s) in Phase 8. Uses `--terminal`, not `--handle` |
-
-### 18.4 External Commands Used
-
-| Command | Phase(s) | Purpose |
-|---------|----------|---------|
-| `git fetch origin` (optionally `git pull --ff-only`) | 3, 4, 8 | The coordinator's ONLY git ops in its own checkout — it never runs `git checkout` |
-| `(cd <wt> && git fetch origin main && git rebase origin/main)` | 7 | Rebase the feature branch inside the worktree |
-| `(cd <wt> && git status --porcelain / git diff --name-only <base_sha>..HEAD)` | 5 | Post-round owns verification |
-| `(cd <wt> && git revert --no-commit <range>)` | 6 | Degrade: revert a failed subtask's commit range |
-| `(cd <wt> && git push …)` | 7 | Push the feature branch (coordinator only) |
-| `git push origin --delete <branch>` | 8 | Delete the merged feature branch |
-| `gh pr create --base main --head <branch> --title … --body …` | 7 | Create the ONE feature PR — **always check the exit code** |
-| `gh pr view --json state,mergeStateStatus` | 7 | PR lifecycle monitoring, 60s polling |
-| `jq` (tmp file + `mv`) | all | Atomic state-file writes |
+> Moved to [`references/api-reference.md`](./references/api-reference.md) —
+> the verified Orca CLI surface: `orca orchestration` / `worktree` /
+> `terminal` commands and the external git/gh/jq commands.
 
 ---
 
