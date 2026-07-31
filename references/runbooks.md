@@ -151,3 +151,4 @@ jq --arg ts "$(date -Iseconds)" \
 orca terminal list --json | jq -r '.result.terminals[].handle' | while read -r H; do
   orca terminal close --terminal "$H" --json 2>/dev/null || true
 done
+```
