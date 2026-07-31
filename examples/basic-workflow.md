@@ -1,44 +1,39 @@
-# Example: Add User Preferences — End-to-End Walkthrough (v2.2.0)
+# 示例：添加用户偏好设置 —— 端到端完整演练（v2.2.0）
 
-> Annotated walkthrough of a complete multi-agent workflow run with the
-> **v2.2.0 shared-worktree wave model**. Task: "Add user preferences — API
-> endpoints plus a settings UI panel." Two subtasks execute inside **ONE
-> shared feature worktree** on **ONE feature branch**, producing **ONE PR**.
-> Parallelism safety comes from disjoint per-subtask `owns` globs, not from
-> filesystem isolation; dependencies mean **serial waves**, not stacked
-> branches.
+> 一次完整多智能体工作流运行的带注释演练，基于
+> **v2.2.0 共享 worktree 波次模型**。任务：「添加用户偏好设置 —— API
+> 接口加一个设置 UI 面板。」两个子任务在**同一个共享特性 worktree**、
+> **同一条特性分支**上执行，最终产出**同一个 PR**。
+> 并行安全性来自各子任务互不相交的 `owns` glob，而不是文件系统隔离；
+> 依赖关系意味着**串行波次**，而不是堆叠分支。
 
-## What's Different From v2.1.0
+## 与 v2.1.0 的差异
 
-- **One feature = one worktree + one branch + one PR.** v2.1.0's per-subtask
-  worktrees, stacked branches, per-subtask PRs, draft PRs, the §11.8
-  stacked-PR rebase hook, and the branch/worktree-path templates are all
-  removed.
-- **`owns` replaces isolation.** Every subtask declares the path globs it may
-  write; same-wave (parallel) subtasks must have disjoint `owns`, validated
-  during plan review.
-- **Plan review is a separate review task** whose verdict arrives via
-  `worker_done` — `gate-create` is no longer used for agent reviews.
-- **User interaction uses the coordinator's native channel** — never
-  `orca orchestration ask --to coordinator` (that verb is worker→coordinator
-  only).
-- **Phase 7 gains an INTEGRATION REVIEW** of the whole feature diff
-  (`ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW`, default 2).
-- **The coordinator never runs `git checkout`** — it stays on the main branch
-  for the entire run; all feature git ops happen inside the worktree via
-  `(cd <wt> && git ...)`.
-- The v2.0.1 "scope-reduction" confirm option is removed (parallel writes
-  into the coordinator's main checkout are unsafe); users reduce scope via
-  **Revise** instead.
+- **一个特性 = 一个 worktree + 一条分支 + 一个 PR。** v2.1.0 的按子任务
+  worktree、堆叠分支、按子任务 PR、draft PR、§11.8
+  堆叠 PR rebase 钩子，以及分支/worktree 路径模板，全部移除。
+- **`owns` 取代隔离。** 每个子任务声明自己可写入的路径 glob；
+  同一波次（并行）的子任务 `owns` 必须互不相交，由计划审查校验。
+- **计划审查是一个独立的审查任务**，其 verdict 通过
+  `worker_done` 返回 —— Agent 审查不再使用 `gate-create`。
+- **用户交互走协调者的原生渠道** —— 绝不使用
+  `orca orchestration ask --to coordinator`（该动词仅供 worker→协调者使用）。
+- **Phase 7 新增合并前总体 Review（integration review）**，针对整个特性
+  diff（`ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW`，默认 2）。
+- **协调者绝不运行 `git checkout`** —— 整个运行期间它都停留在 main
+  分支上；所有特性相关的 git 操作都在 worktree 内通过
+  `(cd <wt> && git ...)` 完成。
+- v2.0.1 的「缩减范围」确认选项已移除（向协调者的 main 检出并行写入
+  是不安全的）；用户改用**「修订」**来缩减范围。
 
-## The Scenario
+## 场景设定
 
 ```
-User: "Add user preferences — API endpoints, plus a UI panel in the
-       dashboard that calls them."
+用户："添加用户偏好设置 —— API 接口，外加 dashboard 里一个调用它们的
+       UI 面板。"
 ```
 
-Approved decomposition (final plan, Phase 2 output):
+获批的拆分方案（最终计划，Phase 2 输出）：
 
 ```json
 [
@@ -67,58 +62,56 @@ Approved decomposition (final plan, Phase 2 output):
 ]
 ```
 
-Wave layout (topological levels of the DAG):
+波次布局（DAG 的拓扑分层）：
 
 ```
-wave 0 (dispatched first):  sub-1   owns: server/**, migrations/**
-wave 1 (after sub-1 PASS):  sub-2   owns: web/src/settings/**
+波次 0（最先分发）：       sub-1   owns: server/**, migrations/**
+波次 1（sub-1 PASS 之后）：sub-2   owns: web/src/settings/**
 ```
 
-Agent routing for this run (defaults): plan = `claude` (fallback `pi`), review = `pi`,
-execution = `kimi`, fallback chain = `claude,grok,pi`. Cross-review rule: the
-review agent is never the implementation agent. Limits (defaults):
-`ORCA_WORKFLOW_MAX_REVIEW_ROUNDS=3`, `ORCA_WORKFLOW_MAX_ESCALATE=2`,
-`ORCA_WORKFLOW_MAX_USER_CONFIRM=3`, `ORCA_WORKFLOW_MAX_SUB_RETRY=3`,
-`ORCA_WORKFLOW_MAX_GLOBAL_RETRY=2`, `ORCA_WORKFLOW_MAX_AUTOFIX=2`,
-`ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW=2`.
+本次运行的 Agent 路由（默认值）：计划 = `claude`（备选 `pi`），审查 = `pi`，
+执行 = `kimi`，兜底链 = `claude,grok,pi`。交叉审查规则：审查 Agent 绝不
+与实现 Agent 同家。限额（默认值）：
+`ORCA_WORKFLOW_MAX_REVIEW_ROUNDS=3`、`ORCA_WORKFLOW_MAX_ESCALATE=2`、
+`ORCA_WORKFLOW_MAX_USER_CONFIRM=3`、`ORCA_WORKFLOW_MAX_SUB_RETRY=3`、
+`ORCA_WORKFLOW_MAX_GLOBAL_RETRY=2`、`ORCA_WORKFLOW_MAX_AUTOFIX=2`、
+`ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW=2`。
 
-Prerequisite: the coordinator runs inside an Orca-managed checkout on the
-main branch (`orca status --json` reports `.ok == true`).
+前置条件：协调者运行在 Orca 管理的 main 分支检出内
+（`orca status --json` 报告 `.ok == true`）。
 
 ---
 
-## Phase 1: Requirements Gathering
+## Phase 1：需求收集
 
-The coordinator asks the user through its **own native interaction channel**.
-It does NOT shell out to `orca orchestration ask --to coordinator` — that
-verb exists so *workers* can reach the coordinator, not so the coordinator
-can reach the user.
+协调者通过**自己的原生交互渠道**向用户提问。它不会 shell 调用
+`orca orchestration ask --to coordinator` —— 那个动词是给 *worker* 联系
+协调者用的，不是给协调者联系用户用的。
 
 ```
-Coordinator → user (native channel):
-  "Before planning I need five answers:
-   1. Backend stack? (Node/Express, Go, Python/FastAPI, ...)
-   2. Frontend stack? (React, Vue, plain HTML)
-   3. Auth: how are user identities issued? (JWT, session, magic link)
-   4. Persistence: Postgres, SQLite, KV store?
-   5. Initial preference keys beyond theme / language / notifications?"
+协调者 → 用户（原生渠道）：
+  "开始计划之前我需要五个答案：
+   1. 后端技术栈？（Node/Express、Go、Python/FastAPI……）
+   2. 前端技术栈？（React、Vue、纯 HTML）
+   3. 鉴权：用户身份如何签发？（JWT、session、magic link）
+   4. 持久化：Postgres、SQLite、KV 存储？
+   5. 除了 theme / language / notifications 之外，初始偏好键还有哪些？"
 
-User → coordinator:
-  "Node 22 + Fastify backend, React + Vite frontend, JWT auth, Postgres.
-   Initial keys: theme, language, email_digest."
+用户 → 协调者：
+  "Node 22 + Fastify 后端，React + Vite 前端，JWT 鉴权，Postgres。
+   初始键：theme、language、email_digest。"
 ```
 
-**Gap analysis:** ✅ all checklist items clear after round 1 of ≤5.
-Transition to Phase 2.
+**缺口分析：** ✅ 第 1 轮（上限 ≤5 轮）后检查清单全部明确。
+进入 Phase 2。
 
 ---
 
-## Phase 2: Plan Generation & Review
+## Phase 2：计划生成与审查
 
-The plan agent gets a **fresh terminal** in the coordinator's checkout
-(selector `active`). Planning is text-only: the plan artifact comes back in
-the `worker_done` body and is **never written as a file into the main
-checkout**.
+计划 Agent 在协调者的检出中获得一个**全新终端**
+（选择器 `active`）。计划过程是纯文本的：计划产物通过
+`worker_done` 正文返回，**绝不作为文件写入 main 检出**。
 
 ```bash
 PLAN_TERM=$(orca terminal create \
@@ -154,8 +147,8 @@ taskId + dispatchId + verdict + artifact summary, then idle." \
 orca orchestration dispatch --task "$PLAN_TASK" --to "$PLAN_TERM" --inject --json
 ```
 
-The coordinator waits with a rolling check (a timeout is a checkpoint, not a
-failure — long agent runs routinely take 15–60 min):
+协调者以滚动方式等待（超时只是检查点，不是失败 —— Agent 运行
+ 15–60 分钟是常态）：
 
 ```bash
 orca orchestration check --wait \
@@ -163,9 +156,9 @@ orca orchestration check --wait \
   --timeout-ms 900000 --json
 ```
 
-The plan arrives as text. Review is a **separate task** dispatched to the
-review agent (`pi`) on its own fresh terminal — verdict via `worker_done`,
-NOT `gate-create`:
+计划以文本形式到达。审查是一个**独立任务**，分发到审查 Agent（`pi`）
+自己的全新终端上 —— verdict 通过 `worker_done` 返回，
+而不是 `gate-create`：
 
 ```bash
 PREV_TERM=$(orca terminal create \
@@ -192,56 +185,56 @@ PLAN:
 orca orchestration dispatch --task "$PREV_TASK" --to "$PREV_TERM" --inject --json
 ```
 
-**Review verdict (round 1): PASS.** Wave 0 = `[sub-1]`, wave 1 = `[sub-2]` —
-each wave holds a single subtask, so same-wave disjointness holds trivially;
-cross-wave overlap would be acceptable anyway because waves are serial.
-(`≤ ORCA_WORKFLOW_MAX_REVIEW_ROUNDS=3` review rounds and
-`≤ ORCA_WORKFLOW_MAX_ESCALATE=2` human escalations were available; neither
-was needed.) Both terminals are closed; transition to Phase 3.
+**审查结论（第 1 轮）：PASS。** 波次 0 = `[sub-1]`，波次 1 = `[sub-2]` ——
+每个波次只有一个子任务，同波次不相交性自然成立；跨波次重叠本来也
+可以接受，因为波次是串行的。（可用额度为
+`≤ ORCA_WORKFLOW_MAX_REVIEW_ROUNDS=3` 轮审查和
+`≤ ORCA_WORKFLOW_MAX_ESCALATE=2` 次人工升级；均未用到。）
+两个终端都关闭；进入 Phase 3。
 
 ---
 
-## Phase 3: User Confirmation
+## Phase 3：用户确认
 
-Again via the coordinator's native channel (`≤ ORCA_WORKFLOW_MAX_USER_CONFIRM=3`
-rounds; **Abort terminates the workflow immediately at any round**; there is
-no scope-reduction option — use Revise):
+同样走协调者的原生渠道（`≤ ORCA_WORKFLOW_MAX_USER_CONFIRM=3`
+轮；**「中止」会在任意轮次立即终止工作流**；没有缩减范围选项 ——
+请用「修订」）：
 
 ```
-Coordinator → user (native channel):
-  "✅ Plan approved internally (review round 1: PASS).
+协调者 → 用户（原生渠道）：
+  "✅ 计划已内部获批（审查第 1 轮：PASS）。
 
-   - ONE feature worktree + branch feature/add-user-prefs off origin/main,
-     ONE PR at the end.
-   - Wave 0: sub-1 prefs-api  (owns server/**, migrations/**)
-   - Wave 1: sub-2 prefs-ui   (owns web/src/settings/**) — starts only after
-     sub-1 passes review.
-   - Estimated: ~2–3 h, up to 3 review rounds per subtask, whole-feature
-     integration review before the PR.
+   - 一个特性 worktree + 基于 origin/main 的分支 feature/add-user-prefs，
+     最后产出一个 PR。
+   - 波次 0：sub-1 prefs-api（owns server/**, migrations/**）
+   - 波次 1：sub-2 prefs-ui（owns web/src/settings/**）—— 仅在
+     sub-1 通过审查后才开始。
+   - 预估：约 2–3 小时；每个子任务最多 3 轮审查；PR 之前做一次
+     整个特性的合并前总体 Review。
 
-   [Approve]  [Revise]  [Abort]"
+   [批准]  [修订]  [中止]"
 
-User → coordinator: "Approve"
+用户 → 协调者："批准"
 ```
 
 ---
 
-## Phase 4: Feature Worktree & Wave 0 Dispatch
+## Phase 4：特性 worktree 与波次 0 分发
 
-The coordinator stays on main. Its only git ops in its own checkout are
-`git fetch origin` (optionally `git pull --ff-only`).
+协调者停留在 main。它在自有检出里仅有的 git 操作是
+`git fetch origin`（可选 `git pull --ff-only`）。
 
 ```bash
 git fetch origin main
 
-# Resume/existence check, matched by name:
+# 续跑/存在性检查，按名称匹配：
 orca worktree list --json \
   | jq -r '.result.worktrees[]? | select(.name=="add-user-prefs") | .id'
-# → empty: no leftover worktree from an earlier run
-# (confirm exact JSON field names on first live run)
+# → 为空：没有上一次运行残留的 worktree
+#（首次实跑时确认 JSON 字段名的准确拼写）
 
-# Create the ONE feature worktree; the branch feature/add-user-prefs is based
-# on origin/main. No positional path arg, no --base flag.
+# 创建唯一的一个特性 worktree；分支 feature/add-user-prefs 基于
+# origin/main。没有位置路径参数，也没有 --base 标志。
 WT_JSON=$(orca worktree create \
   --name "add-user-prefs" \
   --base-branch origin/main \
@@ -249,11 +242,11 @@ WT_JSON=$(orca worktree create \
 WT_ID=$(jq -r '.result.worktree.id' <<<"$WT_JSON")       # → wt_7f3a2c
 WT_PATH=$(jq -r '.result.worktree.path' <<<"$WT_JSON")   # → /Users/dev/worktrees/add-user-prefs
 WT_BRANCH=$(jq -r '.result.worktree.branch' <<<"$WT_JSON") # → feature/add-user-prefs
-# (confirm exact JSON field names on first live run)
+#（首次实跑时确认 JSON 字段名的准确拼写）
 ```
 
-Record the worktree in `.orca/workflow-state.json` — **all** state updates
-are jq atomic writes (tmp file + `mv`), never `>>` into JSON:
+把 worktree 记入 `.orca/workflow-state.json` —— **所有**状态更新
+都是 jq 原子写入（tmp 文件 + `mv`），绝不对 JSON 用 `>>`：
 
 ```bash
 jq --arg id "$WT_ID" --arg path "$WT_PATH" --arg branch "$WT_BRANCH" '
@@ -264,14 +257,14 @@ jq --arg id "$WT_ID" --arg path "$WT_PATH" --arg branch "$WT_BRANCH" '
   && mv .orca/workflow-state.json.tmp .orca/workflow-state.json
 ```
 
-Wave computation: `sub-1` has no deps → wave 0; `sub-2` depends on `sub-1` →
-wave 1. **Only wave 0 is dispatched now.** Even though the worktree is
-shared, `sub-2` must wait for `sub-1`'s verdict — it will see sub-1's
-committed code naturally in the same checkout later.
+波次计算：`sub-1` 无依赖 → 波次 0；`sub-2` 依赖 `sub-1` →
+波次 1。**现在只分发波次 0。** 尽管 worktree 是共享的，`sub-2`
+也必须等待 `sub-1` 的 verdict —— 之后它会在同一个检出里自然地看到
+sub-1 已提交的代码。
 
 ```bash
-# Every dispatch records the subtask's base_sha = current feature-branch HEAD.
-SUB1_BASE=$(cd "$WT_PATH" && git rev-parse HEAD)   # 9f02c1ab… (== origin/main at creation)
+# 每次分发都记录子任务的 base_sha = 特性分支当前 HEAD。
+SUB1_BASE=$(cd "$WT_PATH" && git rev-parse HEAD)   # 9f02c1ab…（创建时 == origin/main）
 
 EXEC_S1=$(orca terminal create \
   --worktree "id:$WT_ID" \
@@ -300,7 +293,7 @@ DONE: send worker_done EXACTLY ONCE to the coordinator handle with
 orca orchestration dispatch --task "$SUB1_TASK" --to "$EXEC_S1" --inject --json
 ```
 
-State after Phase 4 (`.orca/workflow-state.json`):
+Phase 4 之后的状态（`.orca/workflow-state.json`）：
 
 ```json
 {
@@ -374,28 +367,27 @@ State after Phase 4 (`.orca/workflow-state.json`):
 
 ---
 
-## Phase 5: Execution Waves & Cross-Review
+## Phase 5：执行波次与交叉审查
 
-Rounds are numbered `0..ORCA_WORKFLOW_MAX_SUB_RETRY` (0..3 = 1 initial
-attempt + ≤3 retries). Every round = execution/fix on a **fresh terminal via
-a NEW task** (chained with `--parent`; never re-dispatch the same task — Orca
-circuit-breaks a task after 3 consecutive failures), then cross-review on
-**another fresh terminal** with the review agent (`pi` ≠ `kimi`). While
-waiting, the coordinator runs `orca orchestration check --wait ...` in a
-rolling loop; a timeout just means "peek at `task-list` and the worker
-terminals for liveness, then wait again." Subtask wall-clock timeouts are
-enforced by the coordinator itself (`task-update --status failed` +
-`orca terminal close --terminal <handle>`), and a failed execution may be
-retried via the fallback chain (`claude,grok,pi`) — each fallback attempt is also a
-NEW task + NEW terminal. Neither happens in this run.
+轮次编号为 `0..ORCA_WORKFLOW_MAX_SUB_RETRY`（0..3 = 1 次初始
+尝试 + 至多 3 次重试）。每一轮 = 在**全新终端上以新 task** 执行/修复
+（用 `--parent` 串联；绝不重复 dispatch 同一个 task —— Orca 会对连续
+失败 3 次的 task 触发熔断），然后在**另一个全新终端**上用审查 Agent
+（`pi` ≠ `kimi`）做交叉审查。等待期间，协调者以滚动循环运行
+`orca orchestration check --wait ...`；超时只意味着「看一眼
+`task-list` 和 worker 终端确认存活，然后继续等」。子任务的墙钟超时由
+协调者自己执行（`task-update --status failed` +
+`orca terminal close --terminal <handle>`），失败的执行可以走兜底链
+（`claude,grok,pi`）重试 —— 每次兜底尝试同样是新 task + 新终端。
+本次运行两者都没有发生。
 
-### Wave 0 — sub-1 (prefs-api)
+### 波次 0 —— sub-1（prefs-api）
 
-**Round 0 — execution.** `kimi` on `term_s1e0` implements the API in three
-small commits (`9f02c1ab..41d8e77c`), sends `worker_done` once, idles.
+**第 0 轮 —— 执行。** `kimi` 在 `term_s1e0` 上用三个小 commit
+实现 API（`9f02c1ab..41d8e77c`），发送一次 `worker_done`，转入空闲。
 
-**Round 0 — cross-review** on a fresh `pi` terminal, restricted to the
-recorded range and the subtask's `owns`:
+**第 0 轮 —— 交叉审查**，在一个全新的 `pi` 终端上进行，范围限定在
+已记录的区间和该子任务的 `owns` 内：
 
 ```bash
 REV_S1=$(orca terminal create \
@@ -420,17 +412,16 @@ DONE: worker_done EXACTLY ONCE with verdict PASS|FAIL + reasons, then idle." \
 orca orchestration dispatch --task "$SUB1_REVIEW" --to "$REV_S1" --inject --json
 ```
 
-**Verdict: FAIL** — `migrations/20260727110000_create_user_preferences.sql`
-errors on a second run (bare `CREATE TABLE` + plain `INSERT` seed); not
-idempotent. Close `term_s1r0`. `sub-1.review_rounds = 1`.
+**Verdict：FAIL** —— `migrations/20260727110000_create_user_preferences.sql`
+第二次运行时报错（裸 `CREATE TABLE` + 普通 `INSERT` 种子数据）；不具备
+幂等性。关闭 `term_s1r0`。`sub-1.review_rounds = 1`。
 
-**Round 1 — fix.** NEW task chained with `--parent`, FRESH terminal, prior
-feedback quoted in the preamble, and a **newly recorded `base_sha`** (the
-current feature-branch HEAD):
+**第 1 轮 —— 修复。** 用 `--parent` 串联的新 task、全新终端、前言里
+引用上轮反馈，并**重新记录 `base_sha`**（特性分支当前 HEAD）：
 
 ```bash
-SUB1_BASE=$(cd "$WT_PATH" && git rev-parse HEAD)   # 41d8e77c… — overwrite sub-1.base_sha
-                                                    # (initial_base_sha stays 9f02c1ab…)
+SUB1_BASE=$(cd "$WT_PATH" && git rev-parse HEAD)   # 41d8e77c… —— 覆盖 sub-1.base_sha
+                                                    #（initial_base_sha 保持 9f02c1ab… 不变）
 
 FIX_S1=$(orca terminal create \
   --worktree "id:$WT_ID" \
@@ -457,24 +448,24 @@ DONE: worker_done EXACTLY ONCE with taskId + dispatchId + verdict + summary,
 orca orchestration dispatch --task "$SUB1_FIX" --to "$FIX_S1" --inject --json
 ```
 
-The fix lands as one commit (`41d8e77c..c3b55d9e`).
+修复落为单个 commit（`41d8e77c..c3b55d9e`）。
 
-**Round 1 — cross-review** on ANOTHER fresh `pi` terminal (`term_s1r1`),
-range `41d8e77c..HEAD`, same criteria. **Verdict: PASS** — migration now
-idempotent; all criteria met. Close `term_s1r1`.
+**第 1 轮 —— 交叉审查**，在另一个全新的 `pi` 终端（`term_s1r1`）上进行，
+范围 `41d8e77c..HEAD`，标准不变。**Verdict：PASS** —— 迁移现在具备
+幂等性；全部标准满足。关闭 `term_s1r1`。
 
-`sub-1`: verdict=PASS, review_rounds=2, keep_terminal=`term_s1e1` (the newest
-implementation terminal wins; `term_s1e0` is closed).
+`sub-1`：verdict=PASS，review_rounds=2，keep_terminal=`term_s1e1`
+（最新的实现终端胜出；`term_s1e0` 已关闭）。
 
-### Wave 1 — sub-2 (prefs-ui)
+### 波次 1 —— sub-2（prefs-ui）
 
-Gate check: ALL parents of `sub-2` have verdict=PASS ✅ (`sub-1`). The
-dispatcher now sends `sub-2` into the **same** worktree — it naturally sees
-sub-1's committed API code.
+门检查：`sub-2` 的所有父任务均已 verdict=PASS ✅（`sub-1`）。
+分发器现在把 `sub-2` 送进**同一个** worktree —— 它自然地看到
+sub-1 已提交的 API 代码。
 
 ```bash
-SUB2_BASE=$(cd "$WT_PATH" && git rev-parse HEAD)   # c3b55d9e… — sub-2's first dispatch:
-                                                    # record as base_sha AND initial_base_sha
+SUB2_BASE=$(cd "$WT_PATH" && git rev-parse HEAD)   # c3b55d9e… —— sub-2 的首次分发：
+                                                    # 同时记为 base_sha 和 initial_base_sha
 
 EXEC_S2=$(orca terminal create \
   --worktree "id:$WT_ID" \
@@ -504,28 +495,29 @@ DONE: worker_done EXACTLY ONCE with taskId + dispatchId + verdict + summary,
 orca orchestration dispatch --task "$SUB2_TASK" --to "$EXEC_S2" --inject --json
 ```
 
-**Round 0 — execution:** two small commits (`c3b55d9e..7ea01f42`).
-**Round 0 — cross-review** on fresh `pi` terminal `term_s2r0`, range
-`c3b55d9e..HEAD` within `web/src/settings/**`. **Verdict: PASS** on the first
-attempt. `sub-2`: verdict=PASS, review_rounds=1, keep_terminal=`term_s2e0`.
+**第 0 轮 —— 执行：** 两个小 commit（`c3b55d9e..7ea01f42`）。
+**第 0 轮 —— 交叉审查**，在全新的 `pi` 终端 `term_s2r0` 上进行，范围
+`c3b55d9e..HEAD`，限定 `web/src/settings/**`。**Verdict：PASS**，
+一次通过。`sub-2`：verdict=PASS，review_rounds=1，
+keep_terminal=`term_s2e0`。
 
-### Terminal ledger (per round)
+### 终端台账（按轮次）
 
-| Handle | Stage | Role | Round | Agent | Verdict | Fate |
+| 句柄 | 阶段 | 角色 | 轮次 | Agent | Verdict | 归宿 |
 |--------|-------|------|-------|-------|---------|------|
-| `term_plan` | Planning | plan | — | claude | plan delivered | closed after review |
-| `term_prev` | Planning | review | 1 | pi | PASS | closed |
-| `term_s1e0` | sub-1 | execution | 0 | kimi | done | closed (superseded by r1) |
-| `term_s1r0` | sub-1 | review | 0 | pi | FAIL | closed |
-| `term_s1e1` | sub-1 | fix | 1 | kimi | done | **keep_terminal** → closed in Phase 8 |
-| `term_s1r1` | sub-1 | review | 1 | pi | PASS | closed |
-| `term_s2e0` | sub-2 | execution | 0 | kimi | done | **keep_terminal** → closed in Phase 8 |
-| `term_s2r0` | sub-2 | review | 0 | pi | PASS | closed |
-| `term_ir1` | Phase 7 | integration-review | 1 | pi | FAIL | closed |
-| `term_irf` | Phase 7 | fix | 1 | kimi | done | closed in Phase 8 |
-| `term_ir2` | Phase 7 | integration-review | 2 | pi | PASS | closed |
+| `term_plan` | 计划 | plan | — | claude | 计划已交付 | 审查后关闭 |
+| `term_prev` | 计划 | review | 1 | pi | PASS | 已关闭 |
+| `term_s1e0` | sub-1 | execution | 0 | kimi | done | 已关闭（被 r1 取代） |
+| `term_s1r0` | sub-1 | review | 0 | pi | FAIL | 已关闭 |
+| `term_s1e1` | sub-1 | fix | 1 | kimi | done | **keep_terminal** → Phase 8 关闭 |
+| `term_s1r1` | sub-1 | review | 1 | pi | PASS | 已关闭 |
+| `term_s2e0` | sub-2 | execution | 0 | kimi | done | **keep_terminal** → Phase 8 关闭 |
+| `term_s2r0` | sub-2 | review | 0 | pi | PASS | 已关闭 |
+| `term_ir1` | Phase 7 | integration-review | 1 | pi | FAIL | 已关闭 |
+| `term_irf` | Phase 7 | fix | 1 | kimi | done | Phase 8 关闭 |
+| `term_ir2` | Phase 7 | integration-review | 2 | pi | PASS | 已关闭 |
 
-### State after Phase 5 (excerpt: `tasks.subtasks`)
+### Phase 5 之后的状态（节选：`tasks.subtasks`）
 
 ```json
 {
@@ -574,52 +566,49 @@ attempt. `sub-2`: verdict=PASS, review_rounds=1, keep_terminal=`term_s2e0`.
 }
 ```
 
-Note: `base_sha` holds the SHA recorded at the subtask's **latest** dispatch
-(sub-1: its round-1 fix dispatch; sub-2: its round-0 dispatch) — each review
-covers exactly `<base_sha>..HEAD` for its round. `initial_base_sha` is written
-once at the round-0 dispatch and never overwritten; it anchors the
-degrade-revert range (`<initial_base_sha>..HEAD` limited to `owns`, §10).
+注意：`base_sha` 保存的是子任务**最近一次**分发时记录的 SHA
+（sub-1：第 1 轮修复分发；sub-2：第 0 轮分发）—— 每轮审查恰好覆盖
+当轮的 `<base_sha>..HEAD`。`initial_base_sha` 在第 0 轮分发时写入一次，
+之后绝不覆盖；它锚定降级回滚的范围（限定在 `owns` 内的
+`<initial_base_sha>..HEAD`，见 §10）。
 
 ---
 
-## Phase 6: Aggregation & Decision
+## Phase 6：汇总与决策
 
-Both subtasks reached verdict=PASS → straight to Phase 7. No global retry
-(`global_retries_used` stays 0 of `ORCA_WORKFLOW_MAX_GLOBAL_RETRY=2`). For
-the not-all-pass path, see the **Failure-Scenario Sidebar** at the end.
+两个子任务都达到 verdict=PASS → 直接进入 Phase 7。没有全局重试
+（`global_retries_used` 保持 0，上限 `ORCA_WORKFLOW_MAX_GLOBAL_RETRY=2`）。
+未全部通过的路径见文末的**失败场景附栏**。
 
 ---
 
-## Phase 7: Rebase, Tests, Integration Review & PR
+## Phase 7：Rebase、测试、合并前总体 Review 与 PR
 
-All steps run **inside the feature worktree**; the coordinator never leaves
-main.
+所有步骤都**在特性 worktree 内**运行；协调者绝不离开 main。
 
-### Rebase onto origin/main
+### Rebase 到 origin/main
 
 ```bash
 ( cd "$WT_PATH" && git fetch origin main && git rebase origin/main )
-# → clean: main gained one unrelated docs commit; no overlap with our owns
+# → 干净：main 只多了一个无关的文档 commit；与我们的 owns 无重叠
 ```
 
-Had there been conflicts, the autofix loop would run ≤
-`ORCA_WORKFLOW_MAX_AUTOFIX=2` attempts — a fresh terminal resolves markers
-and runs `git rebase --continue`, and SUCCESS requires the rebase to have
-completed AND zero `^UU` files; any autofix failure escalates to a human
-(manual resolve or PARK). Not needed here.
+如果出现冲突，会运行 ≤ `ORCA_WORKFLOW_MAX_AUTOFIX=2` 次自动修复
+循环 —— 一个全新终端解决冲突标记并运行 `git rebase --continue`，
+SUCCESS 要求 rebase 已完成**且** `^UU` 文件为零；任何自动修复失败都
+升级给人工（手动解决或 PARK）。这里不需要。
 
-### Project tests (in the worktree)
+### 项目测试（在 worktree 内）
 
 ```bash
 ( cd "$WT_PATH" && npm test )
-# ✔ 42 passed, 0 failed — recorded in state under phases.MERGING
+# ✔ 42 通过，0 失败 —— 记录到状态的 phases.MERGING 下
 ```
 
-### Integration review (new in v2.2.0)
+### 合并前总体 Review（v2.2.0 新增）
 
-Per-subtask reviews passed in isolation; now a FRESH `pi` terminal reviews
-the **whole feature as one unit** — read-only mandate, verdict via
-`worker_done`:
+各子任务审查已分别通过；现在用一个全新的 `pi` 终端把**整个特性作为
+一个整体**审查 —— 只读职责，verdict 通过 `worker_done` 返回：
 
 ```bash
 IR1=$(orca terminal create \
@@ -647,12 +636,12 @@ PLAN:
 orca orchestration dispatch --task "$IR1_TASK" --to "$IR1" --inject --json
 ```
 
-**Round 1 verdict: FAIL** — the API error envelope is inconsistent: the
-server replies `400 {"error":{"code":"INVALID_PREFS","message":"…"}}` but
-`web/src/settings/api.ts` types failures as `{message: string}`, so the UI
-toasts "undefined" on validation errors. Close `term_ir1`.
+**第 1 轮 verdict：FAIL** —— API 的错误信封不一致：服务端返回
+`400 {"error":{"code":"INVALID_PREFS","message":"…"}}`，但
+`web/src/settings/api.ts` 把失败类型声明为 `{message: string}`，
+导致 UI 在校验错误时 toast 出 "undefined"。关闭 `term_ir1`。
 
-A FRESH fix terminal applies the findings and commits (round 1 fix):
+一个全新的修复终端应用这些发现并提交（第 1 轮修复）：
 
 ```bash
 IRFIX=$(orca terminal create \
@@ -676,16 +665,16 @@ DONE: worker_done EXACTLY ONCE with taskId + dispatchId + verdict + summary,
   --json | jq -r '.result.task.id')
 
 orca orchestration dispatch --task "$IRFIX_TASK" --to "$IRFIX" --inject --json
-# fix lands as one commit → HEAD = 8bd40c17…
+# 修复落为单个 commit → HEAD = 8bd40c17…
 ```
 
-**Round 2:** ANOTHER FRESH `pi` terminal (`term_ir2`) re-reviews
-`git diff origin/main...HEAD`. **Verdict: PASS.** State:
-`integration_review = {rounds: 2, verdict: "PASS"}`. Had round 2 also failed
-(limit `ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW=2` reached), the human would
-choose: release anyway or PARK.
+**第 2 轮：** 另一个全新的 `pi` 终端（`term_ir2`）重新审查
+`git diff origin/main...HEAD`。**Verdict：PASS。** 状态：
+`integration_review = {rounds: 2, verdict: "PASS"}`。如果第 2 轮也失败
+（达到上限 `ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW=2`），则由人工选择：
+照样发布，或者 PARK。
 
-### Create the ONE PR (exit code checked)
+### 创建唯一的 PR（检查退出码）
 
 ```bash
 ( cd "$WT_PATH" && git push -u origin feature/add-user-prefs )
@@ -719,9 +708,9 @@ fi
 # → https://github.com/org/my-app/pull/118
 ```
 
-(The body would carry a `⚠️ degraded` banner had any subtask been dropped.)
+（若有任何子任务被丢弃，PR 正文会带上 `⚠️ degraded` 横幅。）
 
-### Monitor until merged
+### 监控直至合并
 
 ```bash
 while true; do
@@ -731,43 +720,42 @@ while true; do
     MERGED) break ;;
     CLOSED) echo "PR closed without merge → park the feature"; break ;;
   esac
-  # CHANGES_REQUESTED → fresh pr-fix terminal applies the feedback, pushes,
-  # and monitoring continues.
-  sleep 60   # poll every 60s — NEVER gate-create inside this loop
+  # CHANGES_REQUESTED → 由全新的 pr-fix 终端应用反馈、推送，
+  # 然后继续监控。
+  sleep 60   # 每 60s 轮询一次 —— 此循环内绝不用 gate-create
 done
 ```
 
-A human approves and merges at 13:05 → `pr.state = "MERGED"`,
-`pr.merged_at = "2026-07-27T13:05:41Z"`. Transition to Phase 8.
+人工在 13:05 批准并合并 → `pr.state = "MERGED"`，
+`pr.merged_at = "2026-07-27T13:05:41Z"`。进入 Phase 8。
 
 ---
 
-## Phase 8: Cleanup
+## Phase 8：清理
 
-MERGED path — delete the remote branch, remove the ONE worktree, close the
-kept terminals, and afterwards the coordinator only fetches (never checks
-out):
+MERGED 路径 —— 删除远端分支、移除唯一的 worktree、关闭保留的终端；
+之后协调者只做 fetch（绝不 checkout）：
 
 ```bash
 git push origin --delete feature/add-user-prefs
 
-orca worktree rm --worktree "id:$WT_ID" --force --json   # ("worktree remove" does NOT exist)
+orca worktree rm --worktree "id:$WT_ID" --force --json   #（不存在 "worktree remove" 命令）
 
-# orca worktree rm deletes the local branch only when it is fully merged —
-# an unmerged branch is left behind (verified across two v2.2.0 smoke runs).
-# Delete explicitly to cover both cases; -D not -d (a squash-merged PR's local
-# tip is not an ancestor of main); "not found" just means orca already did it.
+# orca worktree rm 仅在本地分支已完全合并时才删除它 ——
+# 未合并的分支会被留下（已在两次 v2.2.0 冒烟运行中验证）。
+# 显式删除以覆盖两种情况；用 -D 而非 -d（squash 合并的 PR，
+# 其本地 tip 不是 main 的祖先）；报 "not found" 只说明 orca 已经删过了。
 git branch -D feature/add-user-prefs 2>/dev/null || true
 
-orca terminal close --terminal term_s1e1 --json   # sub-1 keep_terminal
-orca terminal close --terminal term_s2e0 --json   # sub-2 keep_terminal
-orca terminal close --terminal term_irf  --json   # integration fix terminal
+orca terminal close --terminal term_s1e1 --json   # sub-1 的 keep_terminal
+orca terminal close --terminal term_s2e0 --json   # sub-2 的 keep_terminal
+orca terminal close --terminal term_irf  --json   # 合并前总体 Review 的修复终端
 
-git fetch origin    # the coordinator's only git op afterwards — NEVER git checkout
+git fetch origin    # 协调者此后唯一的 git 操作 —— 绝不 git checkout
 ```
 
-Append **ONE** history line to `.orca/workflow-history.jsonl`, atomically
-(build the new file in a tmp file, then `mv` — never `>>` JSON):
+向 `.orca/workflow-history.jsonl` 追加**一条**历史记录，原子写入
+（在 tmp 文件中构建新文件，然后 `mv` —— 绝不对 JSON 用 `>>`）：
 
 ```bash
 LINE=$(jq -nc '{
@@ -782,7 +770,7 @@ TMP=$(mktemp .orca/workflow-history.jsonl.XXXXXX)
 mv "$TMP" .orca/workflow-history.jsonl
 ```
 
-Final state update (jq atomic write) and final state:
+最终状态更新（jq 原子写入）与最终状态：
 
 ```bash
 jq '
@@ -843,86 +831,84 @@ jq '
 }
 ```
 
-(The full per-subtask `owns`/`base_sha`/`terminals[]` records from Phase 5
-remain in the file; trimmed here for readability.)
+（Phase 5 中每个子任务的完整 `owns`/`base_sha`/`terminals[]` 记录仍在
+文件里；此处为可读性做了删减。）
 
-### Notification
+### 通知
 
 ```
-Coordinator → user (native channel):
-  "🎉 User preferences shipped.
-   - PR #118 MERGED into main (integration review PASS, round 2 of 2)
-   - Branch feature/add-user-prefs deleted; worktree wt_7f3a2c removed;
-     worker terminals closed
-   - History appended to .orca/workflow-history.jsonl
-   Nothing parked; delivery mode: full."
+协调者 → 用户（原生渠道）：
+  "🎉 用户偏好设置已发布。
+   - PR #118 已 MERGED 进 main（合并前总体 Review PASS，第 2 轮，共 2 轮）
+   - 分支 feature/add-user-prefs 已删除；worktree wt_7f3a2c 已移除；
+     worker 终端已关闭
+   - 历史已追加到 .orca/workflow-history.jsonl
+   没有挂起的项；交付模式：full。"
 ```
 
 ---
 
-## Metrics for This Run
+## 本次运行的指标
 
-| Metric | Value |
+| 指标 | 数值 |
 |--------|-------|
-| Total wall-clock | ~2 h 36 min (10:30 → 13:06) |
-| Clarification rounds | 1 (≤5) |
-| Plan review rounds | 1 (≤3) |
-| Human escalations | 0 (≤2) |
-| User confirm rounds | 1 (≤3) |
-| Subtask pass rate | 2/2 (100%) |
-| Per-subtask review rounds | sub-1 = 2, sub-2 = 1 |
-| Subtask retries used | sub-1 = 1 of 3, sub-2 = 0 of 3 |
-| Integration review rounds | 2 (≤2) |
-| Global retries | 0 (≤2) |
-| Autofix attempts | 0 (≤2) |
-| Fallback attempts | 0 |
-| Terminals spawned | 11 |
-| Worktrees / branches / PRs | 1 / 1 / 1 |
-| Delivery mode | full |
+| 总墙钟时间 | 约 2 小时 36 分钟（10:30 → 13:06） |
+| 澄清轮数 | 1（≤5） |
+| 计划审查轮数 | 1（≤3） |
+| 人工升级次数 | 0（≤2） |
+| 用户确认轮数 | 1（≤3） |
+| 子任务通过率 | 2/2（100%） |
+| 各子任务审查轮数 | sub-1 = 2，sub-2 = 1 |
+| 已用子任务重试 | sub-1 = 3 次中用 1 次，sub-2 = 3 次中用 0 次 |
+| 合并前总体 Review 轮数 | 2（≤2） |
+| 全局重试 | 0（≤2） |
+| 自动修复尝试 | 0（≤2） |
+| 兜底尝试 | 0 |
+| 拉起终端数 | 11 |
+| worktree / 分支 / PR 数 | 1 / 1 / 1 |
+| 交付模式 | full |
 
 ---
 
-## Failure-Scenario Sidebar: sub-2 Exhausts Its Retries
+## 失败场景附栏：sub-2 耗尽重试
 
-Counterfactual: sub-2's cross-review keeps failing — "optimistic update
-reverts on rollback" persists through round 3 (rounds `0..3` = 1 initial
-attempt + 3 retries = `ORCA_WORKFLOW_MAX_SUB_RETRY`). After the final round's
-review the coordinator marks `sub-2` verdict=FAIL. **Siblings continue** —
-sub-1's PASS stands. In Phase 6 the coordinator surfaces the decision through
-its **native channel** (not `gate-create`):
+反事实假设：sub-2 的交叉审查持续失败 —— 「乐观更新在回滚时被还原」
+一直拖到第 3 轮（轮次 `0..3` = 1 次初始尝试 + 3 次重试 =
+`ORCA_WORKFLOW_MAX_SUB_RETRY`）。最后一轮审查之后，协调者把 `sub-2`
+标记为 verdict=FAIL。**兄弟子任务不受影响** —— sub-1 的 PASS 依然
+有效。在 Phase 6，协调者通过**原生渠道**（而非 `gate-create`）把决策
+呈现给用户：
 
 ```
-Coordinator → user (native channel):
-  "⚠️ 1/2 subtasks failed:
-   - sub-2 (prefs-ui): review never passed after 4 rounds (0..3).
-     Last feedback: 'Optimistic update still reverts on rollback.'
-   Choose:
-   [1] Retry failed subtasks only
-   [2] Degrade — drop sub-2, ship sub-1
-   [3] Abort — park the whole feature"
+协调者 → 用户（原生渠道）：
+  "⚠️ 1/2 子任务失败：
+   - sub-2（prefs-ui）：4 轮（0..3）后审查仍未通过。
+     最近反馈：'乐观更新在回滚时仍被还原。'
+   请选择：
+   [1] 仅重试失败的子任务
+   [2] 降级 —— 丢弃 sub-2，发布 sub-1
+   [3] 中止 —— 挂起整个特性"
 ```
 
-- **[1] Retry failed subtasks only.** Allowed while
-  `global_retries_used < ORCA_WORKFLOW_MAX_GLOBAL_RETRY` (2), checked
-  **before** incrementing → at most 2 global retries. `sub-2` re-enters its
-  round loop with a fresh task chain and fresh terminals; `sub-1` is
-  untouched — its verdict and commits stand.
-- **[2] Degrade.** The coordinator reverts sub-2's commit range **inside the
-  feature worktree**:
+- **[1] 仅重试失败的子任务。** 在
+  `global_retries_used < ORCA_WORKFLOW_MAX_GLOBAL_RETRY`（2）时允许，
+  **先检查再**自增 → 至多 2 次全局重试。`sub-2` 以全新的 task 链和
+  全新终端重新进入轮次循环；`sub-1` 不受影响 —— 它的 verdict 和
+  commit 保持有效。
+- **[2] 降级。** 协调者**在特性 worktree 内**回滚 sub-2 的 commit
+  区间：
 
   ```bash
   ( cd "$WT_PATH" && git revert --no-edit c3b55d9e..7ea01f42 )
-  # c3b55d9e = sub-2.initial_base_sha (round-0 dispatch HEAD) → the range
-  # covers ALL of sub-2's rounds; sub-1's commits are untouched.
+  # c3b55d9e = sub-2.initial_base_sha（第 0 轮分发时的 HEAD）→ 该区间
+  # 覆盖 sub-2 的所有轮次；sub-1 的 commit 不受影响。
   ```
 
-  The revert is clean **because owns are disjoint** — sub-2's commits touch
-  only `web/src/settings/**`, which no other subtask ever wrote. Execution
-  continues to Phase 7 with `delivery_mode = "degraded"` and a ⚠️ degraded
-  banner in the PR body. If the revert is **not** clean → park the whole
-  feature instead.
-- **[3] Abort → TERMINATED**, and the whole feature is parked: write
-  `.orca/parked/add-user-prefs.md` (branch, worktree path, PR url if any,
-  reason, recovery steps), **KEEP** the worktree + branch for later
-  resumption, close the terminals, and append the single history line with
-  `pr_state: "PARKED"`.
+  回滚之所以干净，**是因为 owns 互不相交** —— sub-2 的 commit 只触碰
+  `web/src/settings/**`，没有其他子任务写过那里。随后以
+  `delivery_mode = "degraded"` 继续执行到 Phase 7，并在 PR 正文中加上
+  ⚠️ degraded 横幅。如果回滚**不**干净 → 改为挂起整个特性。
+- **[3] 中止 → TERMINATED**，整个特性被挂起：写
+  `.orca/parked/add-user-prefs.md`（分支、worktree 路径、PR url（如有）、
+  原因、恢复步骤），**保留** worktree 和分支以便日后恢复，关闭终端，
+  并追加单条历史记录，`pr_state: "PARKED"`。

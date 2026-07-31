@@ -1,20 +1,19 @@
-# Workflow State Diagram
+# Workflow 状态图
 
-> Full Mermaid flowchart for the Multi-Agent Orchestration Workflow **v2.2.0**.
-> Rendering: paste this into any Mermaid-compatible viewer (GitHub, Mermaid Live, Obsidian).
-> Diagram node labels are in Chinese; the surrounding documentation is English.
+> 多智能体编排 Workflow **v2.2.0** 的完整 Mermaid 流程图。
+> 渲染方式：粘贴到任意支持 Mermaid 的查看器（GitHub、Mermaid Live、Obsidian）。
+> 本文档全文（含图内节点标签）为简体中文；状态机枚举值等技术标识保持英文。
 >
-> v2.2.0 key change: **one worktree per feature**. The coordinator stays on the
-> main branch for the entire run (never `git checkout`); every sub-task executes
-> inside a single shared feature worktree on one `feature/<slug>` branch based on
-> `origin/main`, and the feature ships as ONE PR. Parallelism safety comes from
-> per-sub-task `owns` file-ownership globs — same-wave sub-tasks must have
-> disjoint `owns`, validated during plan review — and dispatch happens in DAG
-> **waves**: a dependent sub-task starts only after ALL its parents reach
-> verdict=PASS, seeing their committed code naturally in the shared worktree.
-> Before the PR is created, a dedicated **integration review** (fresh read-only
-> review terminal) reviews the whole feature: plan, per-sub-task verdicts, test
-> results, and `git diff origin/main...HEAD`.
+> v2.2.0 关键变更：**每个 feature 一个 worktree**。协调者全程停留在
+> main 分支（绝不 `git checkout`）；所有子任务都在同一个共享的 feature
+> worktree 中执行，基于 `origin/main` 的同一个 `feature/<slug>` 分支上，
+> 整个 feature 以**一个** PR 交付。并行安全来自每个子任务声明的 `owns`
+> 文件所有权 glob —— 同一波次的子任务 `owns` 必须互不相交，在计划审查阶段
+> 校验 —— 分发按 DAG **波次**进行：有依赖的子任务只有在其**全部**父任务
+> 达到 verdict=PASS 后才启动，并能在共享 worktree 中自然看到父任务已提交
+> 的代码。创建 PR 之前，由一个专门的**合并前总体 Review**（integration
+> review，全新只读审查终端）审查整个 feature：方案、各子任务 verdict、测试
+> 结果，以及 `git diff origin/main...HEAD`。
 
 ```mermaid
 graph TD
@@ -120,59 +119,59 @@ graph TD
     Notify --> End([结束])
 ```
 
-## State Transition Table
+## 状态流转表
 
-PARKED is a **feature-level** state in v2.2.0 (there is exactly one worktree,
-branch, and PR per run). `MERGING` sub-steps run in the fixed order
-`rebase → autofix → tests → integration-review → pr-create → pr-monitor`.
+`PARKED` 在 v2.2.0 中是 **feature 级**状态（每次运行恰好只有一个
+worktree、一个分支、一个 PR）。`MERGING` 的子步骤按固定顺序执行：
+`rebase → autofix → tests → integration-review → pr-create → pr-monitor`。
 
-| From | Trigger | To | Guard |
+| 起始状态 | 触发条件 | 目标状态 | 约束条件 |
 |------|---------|----|-------|
-| `INIT` | User request received; prerequisites verified | `GATHERING` | `orca status --json` ok; coordinator inside an Orca-managed checkout on `main` |
-| `GATHERING` | Requirements clear | `PLANNING` | Q1 = yes |
-| `GATHERING` | Clarification rounds exhausted | `TERMINATED` | > 5 rounds; user interaction only via the coordinator's native channel |
-| `PLANNING` | Review-agent verdict = PASS (via `worker_done`) | `CONFIRMING` | Review is a separate dispatched task (never gate-create); checklist requires every sub-task to declare `owns` and same-wave `owns` to be disjoint |
-| `PLANNING` | Review FAIL, rounds remain | `PLANNING` | Round ≤ MAX_REVIEW_ROUNDS (3); plan revised with review feedback, passed as text |
-| `PLANNING` | Rounds exhausted, escalate to human | `PLANNING` | Escalations ≤ MAX_ESCALATE (2) |
-| `PLANNING` | Escalations exhausted | `TERMINATED` | Terminate1 |
-| `CONFIRMING` | User approves | `DISPATCHING` | — |
-| `CONFIRMING` | User rejects, rounds remain | `PLANNING` | Round ≤ MAX_USER_CONFIRM (3); feedback carries back (Revise — no scope-reduction option) |
-| `CONFIRMING` | User rejects, rounds exhausted | `TERMINATED` | Terminate2 |
-| `CONFIRMING` | User aborts | `TERMINATED` | Immediate at ANY round (v2.2.0 off-by-one fix) |
-| `DISPATCHING` | Same-name worktree found | `DISPATCHING` (resume) | `orca worktree list --json` matched by name — crash recovery; reuse, do not recreate |
-| `DISPATCHING` | Worktree created + wave 0 dispatched | `EXECUTING` | `git fetch origin main` + `orca worktree create --name "<slug>" --base-branch origin/main`; state records worktree {id, path, branch_name, base_branch} |
-| `DISPATCHING` | Worktree creation failed | `TERMINATED` | Infra-level failure |
-| `EXECUTING` (wave w) | Every sub-task in wave w at verdict=PASS | `EXECUTING` (wave w+1) | A dependent sub-task dispatches only after ALL parents PASS; it sees parents' committed code in the shared worktree |
-| `EXECUTING.sub-N` | Cross-review PASS | `EXECUTING` (waiting on wave) | Review covers only `<base_sha>..HEAD` within the sub-task's `owns`; reviewer ≠ implementer; fresh terminal per round |
-| `EXECUTING.sub-N` | Review FAIL, rounds remain | `EXECUTING.sub-N` (round r+1) | Rounds 0..MAX_SUB_RETRY (1 initial + ≤ 3 retries); NEW task chained with `--parent` on a FRESH terminal — never re-dispatch the same task |
-| `EXECUTING.sub-N` | Final round's review still FAIL | `EXECUTING.sub-N` (FAIL) | verdict=FAIL recorded with reason; siblings continue |
-| `EXECUTING` | All sub-tasks reach a terminal verdict | `DECIDING` | Coordinator waits via rolling `check --wait`; a wait timeout is a liveness checkpoint, not a failure |
-| `DECIDING` | All PASS | `MERGING` | AllOK = yes |
-| `DECIDING` | Retry failed sub-tasks only | `DISPATCHING` | Allowed while global_retries_used < MAX_GLOBAL_RETRY (2), checked BEFORE incrementing — at most 2 retries |
-| `DECIDING` | Degrade | `MERGING` | Coordinator reverts each failed sub-task's commit range in the feature worktree — clean because `owns` are disjoint; unclean revert → `PARKED` |
-| `DECIDING` | Human aborts | `TERMINATED` | Terminate3 |
-| `MERGING.rebase` | `git rebase origin/main` clean | `MERGING.tests` | Runs inside the feature worktree |
-| `MERGING.rebase` | Conflicts | `MERGING.autofix` | ≤ MAX_AUTOFIX (2) attempts; fresh terminal resolves conflicts and runs `git rebase --continue` |
-| `MERGING.autofix` | Rebase completed AND zero `^UU` files | `MERGING.tests` | SUCCESS requires both conditions — then break the loop |
-| `MERGING.autofix` | Any autofix failure / attempts exhausted | human decision | Manual resolve → `MERGING.tests`; give up → `PARKED` |
-| `MERGING.tests` | Project tests run in the worktree, results recorded | `MERGING.integration-review` | Results feed the integration-review spec |
-| `MERGING.integration-review` | Verdict PASS | `MERGING.pr-create` | Fresh read-only review terminal; spec = plan + per-sub-task verdicts + test results + `git diff origin/main...HEAD` |
-| `MERGING.integration-review` | Verdict FAIL, rounds remain | `MERGING.integration-review` (round r+1) | FRESH fix terminal applies findings and commits; ANOTHER fresh review terminal re-reviews; ≤ MAX_INTEGRATION_REVIEW (2) rounds |
-| `MERGING.integration-review` | Rounds exhausted | human decision | Release anyway → `MERGING.pr-create`; park → `PARKED` |
-| `MERGING.pr-create` | `gh pr create` exit code 0 | `MERGING.pr-monitor` | Body = change summary, artifacts, per-sub-task review rounds, integration-review verdict, ⚠️ degraded banner if applicable |
-| `MERGING.pr-monitor` | Poll: `MERGED` | `CLEANING` | `gh pr view --json state,mergeStateStatus` every 60s; never gate-create inside the poll loop |
-| `MERGING.pr-monitor` | Changes Requested | `MERGING.pr-monitor` (pr-fix round) | Fresh fix terminal → push to the same branch → keep monitoring |
-| `MERGING.pr-monitor` | `CLOSED` | `PARKED` | Feature-level park |
-| `PARKED` | Park manifest written | `CLEANING` | `.orca/parked/<feature-slug>.md`: branch, worktree path, PR url, reason, recovery steps; worktree + branch KEPT |
-| `CLEANING` | Merged: remote branch deleted, worktree removed, keep_terminal closed | `CLEANING` (archive) | `git push origin --delete <branch>`; `orca worktree rm --worktree id:<id> --force`; every pr_state handled explicitly (OPEN at cleanup = guard/warn) |
-| `CLEANING` | History appended, state finalized | `DONE` | ONE line to `.orca/workflow-history.jsonl`; state updates via jq atomic write (tmp file + mv); coordinator only runs `git fetch origin` afterwards |
+| `INIT` | 收到用户请求；前置条件已验证 | `GATHERING` | `orca status --json` 正常；协调者位于 Orca 管理的 `main` 检出中 |
+| `GATHERING` | 需求已澄清 | `PLANNING` | Q1 = 是 |
+| `GATHERING` | 澄清轮次耗尽 | `TERMINATED` | > 5 轮；与用户的交互只走协调者的原生通道 |
+| `PLANNING` | Review Agent verdict = PASS（经 `worker_done`） | `CONFIRMING` | 审查是独立分发的 task（绝不 gate-create）；清单要求每个子任务声明 `owns`，且同一波次的 `owns` 互不相交 |
+| `PLANNING` | 审查 FAIL，轮次未超限 | `PLANNING` | 轮次 ≤ MAX_REVIEW_ROUNDS (3)；方案按 Review 意见修改，以文本传递 |
+| `PLANNING` | 轮次耗尽，升级人工 | `PLANNING` | 升级次数 ≤ MAX_ESCALATE (2) |
+| `PLANNING` | 升级次数耗尽 | `TERMINATED` | Terminate1 |
+| `CONFIRMING` | 用户批准 | `DISPATCHING` | — |
+| `CONFIRMING` | 用户否决，轮次未超限 | `PLANNING` | 轮次 ≤ MAX_USER_CONFIRM (3)；反馈带回（仅可继续修改 —— 不提供缩减范围选项） |
+| `CONFIRMING` | 用户否决，轮次耗尽 | `TERMINATED` | Terminate2 |
+| `CONFIRMING` | 用户中止 | `TERMINATED` | 任意轮次立即生效（v2.2.0 off-by-one 修复） |
+| `DISPATCHING` | 发现同名 worktree | `DISPATCHING`（恢复） | `orca worktree list --json` 按名称匹配 —— 崩溃恢复场景；复用，不重建 |
+| `DISPATCHING` | worktree 已创建 + 波次 0 已分发 | `EXECUTING` | `git fetch origin main` + `orca worktree create --name "<slug>" --base-branch origin/main`；状态记录 worktree {id, path, branch_name, base_branch} |
+| `DISPATCHING` | worktree 创建失败 | `TERMINATED` | 基础设施级失败 |
+| `EXECUTING`（波次 w） | 波次 w 的全部子任务 verdict=PASS | `EXECUTING`（波次 w+1） | 有依赖的子任务只有在全部父任务 PASS 后才分发；它在共享 worktree 中能看到父任务已提交的代码 |
+| `EXECUTING.sub-N` | 交叉审查 PASS | `EXECUTING`（等待波次） | 审查只覆盖子任务 `owns` 范围内 `<base_sha>..HEAD` 的变更；审查者 ≠ 实现者；每轮使用全新终端 |
+| `EXECUTING.sub-N` | 审查 FAIL，轮次未超限 | `EXECUTING.sub-N`（第 r+1 轮） | 轮次 0..MAX_SUB_RETRY（1 次初始 + ≤ 3 次重试）；在全新终端上新建 task 并用 `--parent` 串联 —— 绝不重复分发同一个 task |
+| `EXECUTING.sub-N` | 最后一轮审查仍 FAIL | `EXECUTING.sub-N`（FAIL） | verdict=FAIL 连同原因一并记录；兄弟子任务继续执行 |
+| `EXECUTING` | 所有子任务达到终态 verdict | `DECIDING` | 协调者通过滚动 `check --wait` 等待；等待超时是活性检查点，不算失败 |
+| `DECIDING` | 全部 PASS | `MERGING` | AllOK = 是 |
+| `DECIDING` | 仅重试失败的子任务 | `DISPATCHING` | 仅当 global_retries_used < MAX_GLOBAL_RETRY (2) 时允许，在自增**之前**检查 —— 最多重试 2 次 |
+| `DECIDING` | 降级交付 | `MERGING` | 协调者在 feature worktree 中 revert 每个失败子任务的 commit 范围 —— 因 `owns` 互不相交所以干净；revert 不干净 → `PARKED` |
+| `DECIDING` | 人工中止 | `TERMINATED` | Terminate3 |
+| `MERGING.rebase` | `git rebase origin/main` 无冲突 | `MERGING.tests` | 在 feature worktree 内执行 |
+| `MERGING.rebase` | 有冲突 | `MERGING.autofix` | ≤ MAX_AUTOFIX (2) 次尝试；全新终端解决冲突并运行 `git rebase --continue` |
+| `MERGING.autofix` | rebase 完成**且** `^UU` 文件数为零 | `MERGING.tests` | 成功需同时满足两个条件 —— 然后跳出循环 |
+| `MERGING.autofix` | 任意一次 autofix 失败 / 尝试次数耗尽 | 人工决策 | 人工解决 → `MERGING.tests`；放弃 → `PARKED` |
+| `MERGING.tests` | 项目测试已在 worktree 中运行，结果已记录 | `MERGING.integration-review` | 结果写入 integration-review 的 spec |
+| `MERGING.integration-review` | verdict PASS | `MERGING.pr-create` | 全新只读审查终端；spec = 方案 + 各子任务 verdict + 测试结果 + `git diff origin/main...HEAD` |
+| `MERGING.integration-review` | verdict FAIL，轮次未超限 | `MERGING.integration-review`（第 r+1 轮） | 全新 fix 终端按 findings 修复并 commit；再用另一个全新审查终端复审；≤ MAX_INTEGRATION_REVIEW (2) 轮 |
+| `MERGING.integration-review` | 轮次耗尽 | 人工决策 | 仍然放行 → `MERGING.pr-create`；park → `PARKED` |
+| `MERGING.pr-create` | `gh pr create` 退出码为 0 | `MERGING.pr-monitor` | Body = 变更摘要、产物、各子任务审查轮次、integration-review verdict，如适用附 ⚠️ 降级交付横幅 |
+| `MERGING.pr-monitor` | 轮询：`MERGED` | `CLEANING` | 每 60s 运行 `gh pr view --json state,mergeStateStatus`；绝不在轮询循环里 gate-create |
+| `MERGING.pr-monitor` | Changes Requested | `MERGING.pr-monitor`（pr-fix 轮） | 全新 fix 终端 → push 到同一分支 → 继续监控 |
+| `MERGING.pr-monitor` | `CLOSED` | `PARKED` | feature 级 park |
+| `PARKED` | park 清单已写入 | `CLEANING` | `.orca/parked/<feature-slug>.md`：分支、worktree 路径、PR url、原因、恢复步骤；worktree + 分支**保留** |
+| `CLEANING` | 已合并：删除远端分支、移除 worktree、关闭 keep_terminal | `CLEANING`（归档） | `git push origin --delete <branch>`；`orca worktree rm --worktree id:<id> --force`；每种 pr_state 都显式处理（清理时仍为 OPEN = 告警/拦截） |
+| `CLEANING` | 历史已追加，状态已定稿 | `DONE` | 向 `.orca/workflow-history.jsonl` 追加**一行**；状态更新用 jq 原子写入（临时文件 + mv）；此后协调者仅运行 `git fetch origin` |
 
-## Termination Exits
+## 终止出口
 
-| Exit | Trigger Condition | Feature State |
+| 出口 | 触发条件 | Feature 状态 |
 |------|------------------|---------------|
-| **Terminate1** | Plan cannot pass review within 3 review rounds + 2 human escalations | No worktree ever created — plan was never approved; nothing to clean up |
-| **Terminate2** | User rejects the plan 3 times, or aborts at any confirmation round | No worktree ever created — user disagreed with the direction |
-| **Terminate3** | Sub-tasks still fail after global retries (≤ 2) and the human chooses abort | Passed sub-tasks' commits remain on the feature branch; worktree + branch disposition follows Phase 8 cleanup |
-| **Feature-level PARKED** (recoverable) | Unclean degrade revert; rebase autofix exhausted + human parks; integration review exhausted + human parks; PR closed unmerged | Worktree + branch KEPT; `.orca/parked/<feature-slug>.md` records branch, worktree path, PR url, reason, recovery steps |
-| **DONE** | PR merged (full or degraded delivery) | Remote branch deleted, worktree removed, keep_terminal closed, one history line appended to `.orca/workflow-history.jsonl` |
+| **Terminate1** | 方案在 3 轮审查 + 2 次人工升级内仍无法通过审查 | 从未创建 worktree —— 方案未获批准；无需清理 |
+| **Terminate2** | 用户 3 次否决方案，或在任意确认轮次中止 | 从未创建 worktree —— 用户不认可该方向 |
+| **Terminate3** | 全局重试（≤ 2 次）后子任务仍失败，且人工选择中止 | 已通过子任务的 commits 保留在 feature 分支上；worktree + 分支按 Phase 8 清理流程处置 |
+| **Feature 级 PARKED**（可恢复） | 降级 revert 不干净；rebase autofix 耗尽 + 人工 park；integration review 轮次耗尽 + 人工 park；PR 未合并被关闭 | worktree + 分支**保留**；`.orca/parked/<feature-slug>.md` 记录分支、worktree 路径、PR url、原因、恢复步骤 |
+| **DONE** | PR 已合并（完整交付或降级交付） | 远端分支已删除，worktree 已移除，keep_terminal 已关闭，向 `.orca/workflow-history.jsonl` 追加一行历史 |
