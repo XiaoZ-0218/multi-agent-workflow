@@ -5,6 +5,25 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [2.2.2] — 2026-07-31
+
+### 变更
+- **SKILL.md 结构瘦身（纯文档重构，无行为变更）**：§13 Observability &
+  Logging 拆至 `references/observability.md`；§16 Testing & Validation 与
+  §17 Operational Runbooks 拆至 `references/runbooks.md`；§18 API Command
+  Reference 拆至 `references/api-reference.md`。内容原样搬运，SKILL.md 原位
+  保留指向新文件的指针，全仓库相关交叉引用同步重接线。
+- **状态机去重**：SKILL.md §2 的 State Transition Table 与
+  `docs/workflow.md` 的状态流转表重复，SKILL.md 侧表格已删除并改为指针；
+  仅存在于 SKILL.md 侧的转移行（CONFIRMING 强制用户决策、任意状态致命错误
+  终止、父任务失败的子任务跳过）已合并进 `docs/workflow.md`。
+- **路由环境变量去重**：SKILL.md §3.3 的 Agent routing 环境变量
+  （`ORCA_WORKFLOW_*_AGENT`、fallback chain）与 `docs/agent-routing.md`
+  （单一起源）重复，已删除，仅保留指针；limits/paths/behaviour 变量留在
+  原处。
+- **版本对齐**：SKILL.md frontmatter 与 README badge 由 2.2.0 更新为
+  2.2.2（2.2.1 条目此前未同步版本号，属历史漂移，一并修正）。
+
 ## [2.2.1] — 2026-07-27
 
 ### 变更
