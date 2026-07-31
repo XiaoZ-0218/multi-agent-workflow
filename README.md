@@ -2,7 +2,7 @@
 
 > **面向 Orca IDE 的生产级多智能体流水线** —— 把用户需求从需求澄清一路推进到合并完成的 PR，支持波次并行执行、跨 Agent 交叉审查、人工兜底介入，以及完整的审计追踪。
 
-[![Skill Version](https://img.shields.io/badge/skill-v2.2.0-blue)](./SKILL.md)
+[![Skill Version](https://img.shields.io/badge/skill-v2.2.2-blue)](./SKILL.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Orca](https://img.shields.io/badge/runtime-Orca%20IDE-orange)](https://orca.app)
 
@@ -154,6 +154,10 @@ multi-agent-workflow/
 ├── docs/
 │   ├── workflow.md                   # Mermaid 流程图（完整状态图）
 │   └── agent-routing.md              # Agent 路由的单一起源
+├── references/
+│   ├── observability.md              # 可观测性与日志（从 SKILL.md §13 拆出：状态文件示例、日志级别、指标）
+│   ├── runbooks.md                   # 测试验证与运维手册（从 SKILL.md §16–§17 拆出）
+│   └── api-reference.md              # Orca CLI 命令参考（从 SKILL.md §18 拆出）
 ├── examples/
 │   └── basic-workflow.md             # 一次完整运行的带注释走读
 ├── .orca/
@@ -169,8 +173,9 @@ multi-agent-workflow/
 
 | 文档 | 说明 |
 |----------|-------------|
-| [`SKILL.md`](./SKILL.md) | 完整技能定义与 API 参考 |
-| [`docs/workflow.md`](./docs/workflow.md) | 完整的 Mermaid 状态图 |
+| [`SKILL.md`](./SKILL.md) | 完整技能定义（API 参考等已拆至 `references/`） |
+| [`docs/workflow.md`](./docs/workflow.md) | 完整的 Mermaid 状态图与状态流转表 |
+| [`references/`](./references) | 按需查阅的参考文档：可观测性、测试/运维手册、API 命令参考 |
 | [`examples/basic-workflow.md`](./examples/basic-workflow.md) | 分步骤走读 |
 
 ---
