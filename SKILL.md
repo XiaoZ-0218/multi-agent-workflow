@@ -206,37 +206,11 @@ feature is parked, never an individual subtask).
 
 ### State Transition Table
 
-| From | Trigger | To | Guard |
-|------|---------|----|-------|
-| `INIT` | User request received | `GATHERING` | — |
-| `GATHERING` | Requirements clear | `PLANNING` | Gap checklist (§5.3) satisfied |
-| `GATHERING` | Clarification rounds exhausted | `TERMINATED` | > 5 rounds |
-| `PLANNING` | Plan review PASS | `CONFIRMING` | Verdict arrives via `worker_done` from the review task — never `gate-create` |
-| `PLANNING` | Review rounds exhausted + escalate ≤ 2 | `PLANNING` | Human direction resets the review counter |
-| `PLANNING` | Escalate count > 2 | `TERMINATED` | Terminate1 |
-| `CONFIRMING` | User approves | `DISPATCHING` | — |
-| `CONFIRMING` | User revises (rounds < 3) | `PLANNING` | Feedback collected |
-| `CONFIRMING` | User aborts | `TERMINATED` | **Immediate, at any round** (no off-by-one) |
-| `CONFIRMING` | Rounds ≥ 3 without approval | `PLANNING` or `TERMINATED` | Forced user decision |
-| `DISPATCHING` | Worktree created + wave 0 dispatched | `EXECUTING` | — |
-| `DISPATCHING` | Worktree creation failed (infra) | `TERMINATED` | Coordinator-side failure only |
-| `EXECUTING` (wave k) | All wave-k subtasks PASS | `EXECUTING` (wave k+1) | Next wave dispatched; skip subtasks whose parents FAILED |
-| `EXECUTING`.sub-N | Cross-review PASS | subtask done | `verdict=PASS` recorded |
-| `EXECUTING`.sub-N | Final round's review still FAIL | subtask `verdict=FAIL` | Siblings continue |
-| `EXECUTING` | All dispatched subtasks have a verdict | `DECIDING` | — |
-| `DECIDING` | All PASS | `MERGING` | — |
-| `DECIDING` | Retry failed subtasks only | `DISPATCHING` | `global_retries_used < MAX_GLOBAL_RETRY` checked **before** incrementing → at most 2 retries |
-| `DECIDING` | Degrade | `MERGING` | Coordinator reverts each failed subtask's commit range; `delivery_mode=degraded` |
-| `DECIDING` | Degrade revert unclean | `PARKED` | Whole feature parked |
-| `DECIDING` | Abort | `TERMINATED` | Terminate3 |
-| `MERGING` | Rebase clean + tests recorded + integration review PASS + PR created | `MERGING` (monitor) | Poll `gh pr view` every 60s |
-| `MERGING` | Autofix exhausted | human decision | Manual resolve or `PARKED` |
-| `MERGING` | Integration review exhausted | human decision | Release anyway or `PARKED` |
-| `MERGING` | PR MERGED | `CLEANING` | — |
-| `MERGING` | PR CLOSED | `PARKED` | Keep worktree + branch |
-| `CLEANING` | Merged path: branch deleted, worktree removed, terminals closed | `DONE` | — |
-| `CLEANING` | Parked path: manifest written, worktree kept | `PARKED` | Recoverable |
-| any | Fatal coordinator error / user abort | `TERMINATED` | State persisted first |
+The authoritative state transition table lives in
+[`docs/workflow.md`](./docs/workflow.md) (状态流转表). It covers every
+transition in the diagram above — including the MERGING sub-steps, the
+PARKED exits, and fatal-error termination — and is the single source of
+truth for guards and triggers.
 
 ---
 

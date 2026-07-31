@@ -137,11 +137,12 @@ worktree、一个分支、一个 PR）。`MERGING` 的子步骤按固定顺序�
 | `CONFIRMING` | 用户批准 | `DISPATCHING` | — |
 | `CONFIRMING` | 用户否决，轮次未超限 | `PLANNING` | 轮次 ≤ MAX_USER_CONFIRM (3)；反馈带回（仅可继续修改 —— 不提供缩减范围选项） |
 | `CONFIRMING` | 用户否决，轮次耗尽 | `TERMINATED` | Terminate2 |
+| `CONFIRMING` | 轮次 ≥ 3 仍未获批准 | `PLANNING` 或 `TERMINATED` | 强制用户决策（对应图中的「强制决策」节点） |
 | `CONFIRMING` | 用户中止 | `TERMINATED` | 任意轮次立即生效（v2.2.0 off-by-one 修复） |
 | `DISPATCHING` | 发现同名 worktree | `DISPATCHING`（恢复） | `orca worktree list --json` 按名称匹配 —— 崩溃恢复场景；复用，不重建 |
 | `DISPATCHING` | worktree 已创建 + 波次 0 已分发 | `EXECUTING` | `git fetch origin main` + `orca worktree create --name "<slug>" --base-branch origin/main`；状态记录 worktree {id, path, branch_name, base_branch} |
 | `DISPATCHING` | worktree 创建失败 | `TERMINATED` | 基础设施级失败 |
-| `EXECUTING`（波次 w） | 波次 w 的全部子任务 verdict=PASS | `EXECUTING`（波次 w+1） | 有依赖的子任务只有在全部父任务 PASS 后才分发；它在共享 worktree 中能看到父任务已提交的代码 |
+| `EXECUTING`（波次 w） | 波次 w 的全部子任务 verdict=PASS | `EXECUTING`（波次 w+1） | 有依赖的子任务只有在全部父任务 PASS 后才分发；它在共享 worktree 中能看到父任务已提交的代码；父任务 FAILED 的子任务被跳过 |
 | `EXECUTING.sub-N` | 交叉审查 PASS | `EXECUTING`（等待波次） | 审查只覆盖子任务 `owns` 范围内 `<base_sha>..HEAD` 的变更；审查者 ≠ 实现者；每轮使用全新终端 |
 | `EXECUTING.sub-N` | 审查 FAIL，轮次未超限 | `EXECUTING.sub-N`（第 r+1 轮） | 轮次 0..MAX_SUB_RETRY（1 次初始 + ≤ 3 次重试）；在全新终端上新建 task 并用 `--parent` 串联 —— 绝不重复分发同一个 task |
 | `EXECUTING.sub-N` | 最后一轮审查仍 FAIL | `EXECUTING.sub-N`（FAIL） | verdict=FAIL 连同原因一并记录；兄弟子任务继续执行 |
@@ -165,6 +166,7 @@ worktree、一个分支、一个 PR）。`MERGING` 的子步骤按固定顺序�
 | `PARKED` | park 清单已写入 | `CLEANING` | `.orca/parked/<feature-slug>.md`：分支、worktree 路径、PR url、原因、恢复步骤；worktree + 分支**保留** |
 | `CLEANING` | 已合并：删除远端分支、移除 worktree、关闭 keep_terminal | `CLEANING`（归档） | `git push origin --delete <branch>`；`orca worktree rm --worktree id:<id> --force`；每种 pr_state 都显式处理（清理时仍为 OPEN = 告警/拦截） |
 | `CLEANING` | 历史已追加，状态已定稿 | `DONE` | 向 `.orca/workflow-history.jsonl` 追加**一行**；状态更新用 jq 原子写入（临时文件 + mv）；此后协调者仅运行 `git fetch origin` |
+| 任意状态 | 协调者致命错误 / 用户中止 | `TERMINATED` | 先持久化状态再终止 |
 
 ## 终止出口
 
