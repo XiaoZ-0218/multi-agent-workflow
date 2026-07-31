@@ -27,6 +27,14 @@
   原处。
 - **版本对齐**：SKILL.md frontmatter 与 README badge 由 2.2.0 更新为
   2.2.2（2.2.1 条目此前未同步版本号，属历史漂移，一并修正）。
+- **SKILL.md 最后一轮非操作性内容精简（纯文档重构，无行为变更）**：
+  删除 §1 的 v2.2.0→v2.1.0 迁移对照表（其独有信息——移除的环境变量
+  清单——已补入本文件 [2.2.0] 条目）；§2 ASCII 状态图替换为单行流程
+  加 `docs/workflow.md` 指针（文字说明保留）；§3.1 内联预检 shell 块
+  替换为 `scripts/check-prerequisites.sh` 指针（脚本检查项为其超集，
+  无检查项丢失）；§3.3 环境变量并入 §4.1（每个变量仅一处定义），§3
+  保留一行指针；删除整节目录（TOC）。所有运行规则、循环上限与禁令
+  均未改动。
 
 ## [2.2.1] — 2026-07-27
 
@@ -95,6 +103,12 @@
   `branch` / `pr_url` 已删除。`current_phase` /
   `current_state` 枚举现在包含 `INIT`，`pr.state` 不再有
   `DRAFT` 取值。
+- **移除不再读取的环境变量**：`ORCA_WORKFLOW_BRANCH_STRATEGY`、
+  `ORCA_WORKFLOW_BRANCH_TEMPLATE`、`ORCA_WORKFLOW_WORKTREE_PATH_TEMPLATE`、
+  `ORCA_WORKFLOW_MAX_TERMINALS_PER_SUBTASK`、
+  `ORCA_WORKFLOW_MIN_WORKERS`（每个 feature 一个 worktree 的模型不需要
+  分支/路径模板，终端数量也不再做预检）；新增
+  `ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW`（默认 2）。
 - **移除缩减范围选项**：v2.0.1 Phase 3 的「缩减范围」路径允许
   并行写入协调者的主 checkout，不安全。用户改用 Revise 来缩减范围。
 
