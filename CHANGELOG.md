@@ -13,6 +13,10 @@
   §17 Operational Runbooks 拆至 `references/runbooks.md`；§18 API Command
   Reference 拆至 `references/api-reference.md`。内容原样搬运，SKILL.md 原位
   保留指向新文件的指针，全仓库相关交叉引用同步重接线。
+- **阶段章节拆分**：§5–§12 八个阶段章节同样拆分为
+  `references/phase-1-gathering.md` … `references/phase-8-cleaning.md`
+  （内容逐字搬运）；SKILL.md 中各阶段节标题保持不变（TOC 锚点不受影响），
+  正文仅保留 3–6 条骨架要点与指向对应 `references/phase-*.md` 的指针。
 - **状态机去重**：SKILL.md §2 的 State Transition Table 与
   `docs/workflow.md` 的状态流转表重复，SKILL.md 侧表格已删除并改为指针；
   仅存在于 SKILL.md 侧的转移行（CONFIRMING 强制用户决策、任意状态致命错误

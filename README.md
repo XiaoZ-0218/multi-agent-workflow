@@ -155,6 +155,14 @@ multi-agent-workflow/
 │   ├── workflow.md                   # Mermaid 流程图（完整状态图）
 │   └── agent-routing.md              # Agent 路由的单一起源
 ├── references/
+│   ├── phase-1-gathering.md          # Phase 1 需求收集完整流程（从 SKILL.md §5 拆出）
+│   ├── phase-2-planning.md           # Phase 2 计划生成与评审完整流程（从 SKILL.md §6 拆出）
+│   ├── phase-3-confirming.md         # Phase 3 用户确认完整流程（从 SKILL.md §7 拆出）
+│   ├── phase-4-dispatching.md        # Phase 4 任务分解与分发完整流程（从 SKILL.md §8 拆出）
+│   ├── phase-5-executing.md          # Phase 5 并行执行与子评审完整流程（从 SKILL.md §9 拆出）
+│   ├── phase-6-deciding.md           # Phase 6 结果汇总与决策完整流程（从 SKILL.md §10 拆出）
+│   ├── phase-7-merging.md            # Phase 7 合并与 PR 完整流程（从 SKILL.md §11 拆出）
+│   ├── phase-8-cleaning.md           # Phase 8 清理与归档完整流程（从 SKILL.md §12 拆出）
 │   ├── observability.md              # 可观测性与日志（从 SKILL.md §13 拆出：状态文件示例、日志级别、指标）
 │   ├── runbooks.md                   # 测试验证与运维手册（从 SKILL.md §16–§17 拆出）
 │   └── api-reference.md              # Orca CLI 命令参考（从 SKILL.md §18 拆出）
@@ -175,7 +183,7 @@ multi-agent-workflow/
 |----------|-------------|
 | [`SKILL.md`](./SKILL.md) | 完整技能定义（API 参考等已拆至 `references/`） |
 | [`docs/workflow.md`](./docs/workflow.md) | 完整的 Mermaid 状态图与状态流转表 |
-| [`references/`](./references) | 按需查阅的参考文档：可观测性、测试/运维手册、API 命令参考 |
+| [`references/`](./references) | 按需查阅的参考文档：各阶段完整流程（phase-1..8）、可观测性、测试/运维手册、API 命令参考 |
 | [`examples/basic-workflow.md`](./examples/basic-workflow.md) | 分步骤走读 |
 
 ---
@@ -189,7 +197,7 @@ multi-agent-workflow/
 cat .orca/workflow-state.json | jq '.current_phase'
 
 # 根据所处阶段恢复
-# （详细恢复步骤见 SKILL.md）
+# （详细恢复步骤见 references/runbooks.md）
 ```
 
 ### 挂起后
