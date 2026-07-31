@@ -1,6 +1,8 @@
-# 多智能体编排工作流
+# Multi-Agent Orchestration Workflow
 
-> **面向 Orca IDE 的生产级多智能体流水线** —— 把用户需求从需求澄清一路推进到合并完成的 PR，支持波次并行执行、跨 Agent 交叉审查、人工兜底介入，以及完整的审计追踪。
+> **Production-grade multi-agent pipeline for Orca IDE** — take a user request from requirements through to a merged PR, with wave-parallel execution, cross-agent review, human-in-the-loop fallbacks, and full audit trail.
+
+**English** | [简体中文](./README.zh-CN.md)
 
 [![Skill Version](https://img.shields.io/badge/skill-v2.2.2-blue)](./SKILL.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
@@ -8,210 +10,211 @@
 
 ---
 
-## 功能概述
+## What It Does
 
-本技能实现了一套**完整的 8 阶段工作流**，协调多个 AI Agent 交付复杂的软件任务：
+This skill implements a **complete 8-phase workflow** that coordinates multiple AI agents to deliver complex software tasks:
 
 ```
-用户请求 → 澄清 → 计划 → 审查 → 确认 → 执行（波次并行）→ 决策 → Rebase + 测试 + 合并前总体 Review → PR → 清理
+User Request → Clarify → Plan → Review → Confirm → Execute (wave-parallel) → Decide → Rebase + Tests + Integration Review → PR → Cleanup
 ```
 
-### 核心特性
+### Key Features
 
-- **🔄 全生命周期**：需求 → 计划 → 执行 → 审查 → 合并前总体 Review → 合并 → 清理
-- **🌳 每个 feature 一个 worktree（v2.2.0）**：整个 feature 都活在基于 `origin/main` 的单一 `feature/<slug>` 分支、单一 worktree 中。协调者始终不离开 `main`（从不执行 `git checkout`），一次运行最终恰好产出**一个 PR**
-- **🧩 基于 owns 的并行安全（v2.2.0）**：每个子任务声明自己 `owns` 的文件/目录；同一波次的子任务必须**所有权互不相交**，由计划审查校验。并行写的安全性来自互不相交的写集合，而非文件系统隔离
-- **🌊 波次分发（v2.2.0）**：依赖关系映射为串行的波次 —— 子任务只有在全部父任务通过后才被分发，并能在共享 worktree 中自然看到父任务已 commit 的代码
-- **🆕 每轮全新 Agent**：实现、交叉审查、修复各自在**全新终端**中运行 —— 不复用 Agent 上下文，不带入前序偏差
-- **🧑‍⚖️ 限定范围的跨 Agent 交叉审查**：审查使用与实现（`claude`/`kimi`）不同家的 Agent（`pi`），见 `docs/agent-routing.md`；每次审查限定在该子任务自身 `owns` 范围内的 commit 区间（`base_sha..HEAD`）
-- **🔬 合并前总体 Review（v2.2.0）**：在创建 PR 之前，由一个全新审查 Agent 审计*整个* feature —— 计划、各子任务 verdict、测试结果、相对 `origin/main` 的完整 diff
-- **🛡️ 硬性循环上限**：每个循环都有最大迭代次数 —— 不存在无限重试
-- **👤 人工介入**：在计划审查、决策、合并边界处升级给人工；**PR 只能由人工合并**
-- **📉 降级或挂起**：失败的子任务会在 feature worktree 中被外科手术式地 revert 其 commit 区间（因 `owns` 互不相交所以干净），产出降级版本；若 revert 不干净，则整个 feature 挂起并留下恢复清单
-- **🔍 完整审计追踪**：每个决策、终端创建、verdict、PR 状态变迁都记录到 `.orca/workflow-state.json`
-- **🔒 单一 PR、仅人工合并**：不做直接的 `git merge` —— 每个 feature 一个 PR，由协调者监控、由人工合并
+- **🔄 Full Lifecycle**: Requirements → Plan → Execute → Review → Integration Review → Merge → Cleanup
+- **🌳 One Worktree Per Feature (v2.2.0)**: the whole feature lives on a single `feature/<slug>` branch in one worktree based on `origin/main`. The coordinator never leaves `main` (no `git checkout`, ever), and the run ends with exactly **one PR**
+- **🧩 Owns-Based Parallel Safety (v2.2.0)**: every sub-task declares the files/dirs it `owns`; same-wave sub-tasks must have **disjoint ownership**, validated during plan review. Parallel-write safety comes from disjoint write sets, not filesystem isolation
+- **🌊 Wave Dispatch (v2.2.0)**: dependencies map to serial waves — a sub-task is dispatched only after all its parents pass, and sees their committed code naturally in the shared worktree
+- **🆕 Fresh Agent Per Round**: implementation, cross-review, and fix each run in a **fresh terminal** — no Agent context reuse, no carry-over bias
+- **🧑‍⚖️ Scoped Cross-Agent Review**: reviews use a different Agent (`pi`) than implementation (`claude`/`kimi`), per `docs/agent-routing.md`, and each review is scoped to the sub-task's own commit range (`base_sha..HEAD`) within its `owns`
+- **🔬 Integration Review (v2.2.0)**: a fresh review agent audits the *whole* feature — plan, per-sub-task verdicts, test results, full diff vs `origin/main` — before the PR is opened
+- **🛡️ Hard Cycle Caps**: every loop has a maximum iteration count — no infinite retries
+- **👤 Human-in-the-Loop**: escalation at plan-review, decision, and merge boundaries; **only a human merges the PR**
+- **📉 Degrade-or-Park**: failed sub-tasks get their commit ranges surgically reverted in the feature worktree (clean because `owns` are disjoint) for a degraded release; if the revert is unclean, the whole feature is parked with a recovery manifest
+- **🔍 Full Audit Trail**: every decision, terminal spawn, verdict, and PR transition is logged to `.orca/workflow-state.json`
+- **🔒 Single PR, Human-Only Merge**: no direct `git merge` — one PR per feature, monitored by the coordinator, merged by a human
 
 ---
 
-## 快速上手
+## Quick Start
 
-### 前置条件
+### Prerequisites
 
-- [Orca IDE](https://orca.app) 正在运行
+- [Orca IDE](https://orca.app) running
 - Git ≥ 2.30
-- GitHub CLI（`gh`）≥ 2.0
+- GitHub CLI (`gh`) ≥ 2.0
 - `jq` ≥ 1.6
 
-### 安装
+### Installation
 
 ```bash
-# 克隆到你的工作区
+# Clone into your workspace
 cd ~/workspace
 git clone https://github.com/your-org/multi-agent-workflow.git
 
-# 或者把 SKILL.md 复制到你的项目中
+# Or copy the SKILL.md into your project
 cp SKILL.md /path/to/your/project/
 ```
 
-### 使用方法
+### Usage
 
 ```bash
-# 1. 进入你的项目检出目录 —— 必须由 Orca 管理。
-#    协调者在整个运行期间都停留在 main 分支上。
+# 1. Navigate to your project checkout — it must be Orca-managed.
+#    The coordinator stays on the main branch for the entire run.
 cd /path/to/project
 
-# 2. 运行前置检查
+# 2. Run the pre-flight checks
 /path/to/multi-agent-workflow/scripts/check-prerequisites.sh
 
-# 3. 在 Orca 中打开该检出目录，在主检出目录的聊天中
-#    向协调者 agent 描述任务，例如：
-#    “给 API 添加一个 /health 端点，并附带测试。”
+# 3. Open the checkout in Orca and describe the task to the coordinator
+#    agent in the main checkout's chat, e.g.:
+#    "Add a /health endpoint to the API, with tests."
 ```
 
-技能会自行驱动每一条 `orca` 命令 —— worktree 创建、波次分发、审查、PR —— 并在每个人工检查点提示你，从需求收集开始。
+The skill drives every `orca` command itself — worktree creation, wave dispatch, reviews, the PR — and prompts you at each human checkpoint, starting with requirements gathering.
 
-> 补充说明：Orca 原生的 `orca orchestration run --spec <text>` 协调者循环是一个可选的替代入口，但上文这种由聊天驱动的流程是推荐路径。
+> Aside: Orca's native `orca orchestration run --spec <text>` coordinator loop exists as an alternative entrypoint, but the chat-driven flow above is the recommended path.
 
 ---
 
-## 架构（v2.2.0）
+## Architecture (v2.2.0)
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│              协调者（本 Agent —— 始终在 main 分支）              │
-│  阶段 1 收集 → 阶段 2 计划+审查 → 阶段 3 确认                    │
-│  阶段 4：创建唯一的 feature worktree（feature/<slug> 基于        │
-│        origin/main）→ 分解 DAG → 分发波次 0                      │
+│                COORDINATOR (This Agent — always on main)         │
+│  Phase 1 Gather → Phase 2 Plan+Review → Phase 3 Confirm          │
+│  Phase 4: create ONE feature worktree (feature/<slug> off        │
+│           origin/main) → decompose DAG → dispatch wave 0         │
 │                              │                                   │
 │        ┌─────────────────────▼────────────────────────┐          │
-│        │        feature worktree（共享）              │          │
-│        │  波次 0：sub-A（owns: api/**）∥ sub-B（ui/**）│         │
-│        │  波次 1：sub-C  ← 依赖 PASS 后运行           │          │
-│        │  每个子任务、每一轮都用全新终端：            │          │
-│        │    执行（小步 commit）→ 交叉审查             │          │
-│        │    （base_sha..HEAD，owns 内）→ 修复 → …     │          │
+│        │          FEATURE WORKTREE (shared)           │          │
+│        │  Wave 0: sub-A (owns: api/**) ∥ sub-B (ui/**)│          │
+│        │  Wave 1: sub-C  ← runs after deps PASS       │          │
+│        │  per sub-task, per round, FRESH terminals:   │          │
+│        │    exec (small commits) → cross-review       │          │
+│        │    (base_sha..HEAD, within owns) → fix → …   │          │
 │        └─────────────────────┬────────────────────────┘          │
-│  阶段 6 ← 收集 verdict：重试 / 降级 / 挂起                       │
-│  阶段 7：rebase origin/main → 测试 → 合并前总体                  │
-│           Review（全新 agent，整 feature diff）→ 唯一 PR         │
-│           → 人工审查并合并 PR                                    │
-│  阶段 8：删除分支、移除 worktree、关闭终端                       │
-│           （或挂起：.orca/parked/<feature-slug>.md）             │
+│  Phase 6 ← collect verdicts: retry / degrade / park              │
+│  Phase 7: rebase origin/main → tests → INTEGRATION               │
+│           REVIEW (fresh agent, whole-feature diff) → ONE PR      │
+│           → human reviews & merges the PR                        │
+│  Phase 8: delete branch, remove worktree, close terminals        │
+│           (or park: .orca/parked/<feature-slug>.md)              │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-### 状态机
+### State Machine
 
-共 8 个阶段，`DISPATCHING` / `EXECUTING` 下挂按波次划分的子任务子图，`MERGING` / `CLEANING` 下挂整个 feature 的子图。终止出口：计划不收敛、用户拒绝/中止、feature 失败（PARKED 是可恢复的）。
+8 phases with a per-wave sub-task subgraph under `DISPATCHING` / `EXECUTING` and a whole-feature subgraph under `MERGING` / `CLEANING`. Terminal exits: plan non-convergence, user rejection/abort, feature failure (PARKED is recoverable).
 
-完整的 Mermaid 图见 [`docs/workflow.md`](./docs/workflow.md)。
+See [`docs/workflow.md`](./docs/workflow.md) for the full Mermaid diagram.
 
 ---
 
-## 各阶段
+## Phases
 
-| # | 阶段 | 做了什么 | 关键命令 |
+| # | Phase | What Happens | Key Command |
 |---|-------|-------------|-------------|
-| 1 | **需求收集** | 通过协调者的原生通道与用户澄清需求（≤5 轮） | 原生用户交互 |
-| 2 | **计划生成** | 生成技术计划；一个独立的审查任务通过 `worker_done` 返回 verdict（最多 3 轮 + 2 次人工升级） | `task-create` + `dispatch --inject` |
-| 3 | **计划确认** | 用户批准计划（最多 3 轮；Abort 立即停止） | 原生用户交互 |
-| 4 | **分发** | 基于 `origin/main` 创建唯一的 feature worktree + 分支，从 DAG 计算波次，分发波次 0 | `worktree create --base-branch origin/main` + `terminal create` + `task-create` + `dispatch --inject` |
-| 5 | **执行** | 每轮使用全新终端：执行/修复 agent 小步 commit；交叉审查限定在子任务 `owns` 范围内的 `base_sha..HEAD` | `terminal create` + `dispatch --inject` + `check --wait` |
-| 6 | **决策** | 收集 verdict；用户选择重试（最多 2 次）/ 降级（revert 失败的 commit 区间）/ 中止 | `task-list` + 原生用户交互 |
-| 7 | **合并** | Rebase 到 `origin/main`（自动修复冲突 ≤2 次）、跑测试、由全新 agent 做**合并前总体 Review**（≤2 轮），然后产出唯一 PR；由人工合并 | `git rebase` + `gh pr create` + `gh pr view` |
-| 8 | **清理** | 按 feature 清理：删除分支、移除 worktree、关闭 `keep_terminal`；或写入 `.orca/parked/<feature-slug>.md` | `worktree rm` + `terminal close` |
+| 1 | **Gathering** | Clarify requirements with the user via the coordinator's native channel (≤5 rounds) | native user interaction |
+| 2 | **Planning** | Generate technical plan; a separate review task returns its verdict via `worker_done` (max 3 rounds + 2 escalations) | `task-create` + `dispatch --inject` |
+| 3 | **Confirming** | User approves the plan (max 3 rounds; Abort stops immediately) | native user interaction |
+| 4 | **Dispatching** | Create the ONE feature worktree + branch off `origin/main`, compute waves from the DAG, dispatch wave 0 | `worktree create --base-branch origin/main` + `terminal create` + `task-create` + `dispatch --inject` |
+| 5 | **Executing** | Per-round fresh terminals: exec/fix agents commit in small commits; cross-review is scoped to `base_sha..HEAD` within the sub-task's `owns` | `terminal create` + `dispatch --inject` + `check --wait` |
+| 6 | **Deciding** | Collect verdicts; user chooses retry (max 2) / degrade (revert failed commit ranges) / abort | `task-list` + native user interaction |
+| 7 | **Merging** | Rebase onto `origin/main` (autofix ≤2), run tests, **integration review** by a fresh agent (≤2 rounds), then ONE PR; human merges | `git rebase` + `gh pr create` + `gh pr view` |
+| 8 | **Cleaning** | Per-feature cleanup: delete branch, remove worktree, close `keep_terminal`; or write `.orca/parked/<feature-slug>.md` | `worktree rm` + `terminal close` |
 
 ---
 
-## 配置
+## Configuration
 
-所有参数均可通过环境变量调整：
+All parameters are tunable via environment variables:
 
 ```bash
-export ORCA_WORKFLOW_MAX_REVIEW_ROUNDS=3       # 计划审查重试次数
-export ORCA_WORKFLOW_MAX_ESCALATE=2            # 终止前的人工升级次数
-export ORCA_WORKFLOW_MAX_USER_CONFIRM=3        # 用户确认重试次数
-export ORCA_WORKFLOW_MAX_SUB_RETRY=3           # 每个子任务的执行/修复重试次数
-export ORCA_WORKFLOW_MAX_GLOBAL_RETRY=2        # 失败批次的重试轮数
-export ORCA_WORKFLOW_MAX_AUTOFIX=2             # rebase 期间自动解决冲突的尝试次数
-export ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW=2  # 合并前总体 Review 轮数（v2.2.0 新增）
-export ORCA_WORKFLOW_STRICT_PREREQ=false       # 为 true 时将前置条件缺失视为致命错误
-export ORCA_WORKFLOW_DRY_RUN=false             # 仅计划模式，不做分发
+export ORCA_WORKFLOW_MAX_REVIEW_ROUNDS=3       # Plan review retries
+export ORCA_WORKFLOW_MAX_ESCALATE=2            # Human escalations before terminate
+export ORCA_WORKFLOW_MAX_USER_CONFIRM=3        # User confirmation retries
+export ORCA_WORKFLOW_MAX_SUB_RETRY=3           # Per-sub-task execution/fix retries
+export ORCA_WORKFLOW_MAX_GLOBAL_RETRY=2        # Failed-batch retry rounds
+export ORCA_WORKFLOW_MAX_AUTOFIX=2             # Auto conflict-resolution attempts during rebase
+export ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW=2  # Integration review rounds (new in v2.2.0)
+export ORCA_WORKFLOW_STRICT_PREREQ=false       # Treat missing prereqs as fatal when true
+export ORCA_WORKFLOW_DRY_RUN=false             # Plan-only mode, no dispatches
 ```
 
-完整配置参考见 [`SKILL.md`](./SKILL.md)。
+See [`SKILL.md`](./SKILL.md) for the full configuration reference.
 
 ---
 
-## 项目结构
+## Project Structure
 
 ```
 multi-agent-workflow/
-├── SKILL.md                          # 技能定义（Orca 加载的就是它）
-├── README.md                         # 本文件
-├── CHANGELOG.md                      # 版本历史
-├── LICENSE                           # MIT 许可证
+├── SKILL.md                          # The skill definition (this is what Orca loads)
+├── README.md                         # This file
+├── README.zh-CN.md                   # 简体中文版的 README
+├── CHANGELOG.md                      # Version history
+├── LICENSE                           # MIT license
 ├── docs/
-│   ├── workflow.md                   # Mermaid 流程图（完整状态图）
-│   └── agent-routing.md              # Agent 路由的单一起源
+│   ├── workflow.md                   # Mermaid flowchart (full state diagram)
+│   └── agent-routing.md              # Single source of truth for agent routing
 ├── references/
-│   ├── phase-1-gathering.md          # Phase 1 需求收集完整流程（从 SKILL.md §5 拆出）
-│   ├── phase-2-planning.md           # Phase 2 计划生成与评审完整流程（从 SKILL.md §6 拆出）
-│   ├── phase-3-confirming.md         # Phase 3 用户确认完整流程（从 SKILL.md §7 拆出）
-│   ├── phase-4-dispatching.md        # Phase 4 任务分解与分发完整流程（从 SKILL.md §8 拆出）
-│   ├── phase-5-executing.md          # Phase 5 并行执行与子评审完整流程（从 SKILL.md §9 拆出）
-│   ├── phase-6-deciding.md           # Phase 6 结果汇总与决策完整流程（从 SKILL.md §10 拆出）
-│   ├── phase-7-merging.md            # Phase 7 合并与 PR 完整流程（从 SKILL.md §11 拆出）
-│   ├── phase-8-cleaning.md           # Phase 8 清理与归档完整流程（从 SKILL.md §12 拆出）
-│   ├── observability.md              # 可观测性与日志（从 SKILL.md §13 拆出：状态文件示例、日志级别、指标）
-│   ├── runbooks.md                   # 测试验证与运维手册（从 SKILL.md §16–§17 拆出）
-│   └── api-reference.md              # Orca CLI 命令参考（从 SKILL.md §18 拆出）
+│   ├── phase-1-gathering.md          # Phase 1 full procedure (extracted from SKILL.md §5)
+│   ├── phase-2-planning.md           # Phase 2 full procedure (extracted from SKILL.md §6)
+│   ├── phase-3-confirming.md         # Phase 3 full procedure (extracted from SKILL.md §7)
+│   ├── phase-4-dispatching.md        # Phase 4 full procedure (extracted from SKILL.md §8)
+│   ├── phase-5-executing.md          # Phase 5 full procedure (extracted from SKILL.md §9)
+│   ├── phase-6-deciding.md           # Phase 6 full procedure (extracted from SKILL.md §10)
+│   ├── phase-7-merging.md            # Phase 7 full procedure (extracted from SKILL.md §11)
+│   ├── phase-8-cleaning.md           # Phase 8 full procedure (extracted from SKILL.md §12)
+│   ├── observability.md              # State file, log levels, metrics (from SKILL.md §13)
+│   ├── runbooks.md                   # Testing & operational runbooks (from SKILL.md §16–§17)
+│   └── api-reference.md              # Orca CLI command reference (from SKILL.md §18)
 ├── examples/
-│   └── basic-workflow.md             # 一次完整运行的带注释走读
+│   └── basic-workflow.md             # Annotated walkthrough of a complete run
 ├── .orca/
-│   ├── workflow-config.json          # 项目级默认配置
-│   └── workflow-state.schema.json    # 状态文件的 JSON Schema
+│   ├── workflow-config.json          # Project-local default configuration
+│   └── workflow-state.schema.json    # JSON Schema for the state file
 └── scripts/
-    └── check-prerequisites.sh        # 前置检查脚本
+    └── check-prerequisites.sh        # Pre-flight validation script
 ```
 
 ---
 
-## 文档
+## Documentation
 
-| 文档 | 说明 |
+| Document | Description |
 |----------|-------------|
-| [`SKILL.md`](./SKILL.md) | 完整技能定义（API 参考等已拆至 `references/`） |
-| [`docs/workflow.md`](./docs/workflow.md) | 完整的 Mermaid 状态图与状态流转表 |
-| [`references/`](./references) | 按需查阅的参考文档：各阶段完整流程（phase-1..8）、可观测性、测试/运维手册、API 命令参考 |
-| [`examples/basic-workflow.md`](./examples/basic-workflow.md) | 分步骤走读 |
+| [`SKILL.md`](./SKILL.md) | Full skill definition (reference material split into `references/`) |
+| [`docs/workflow.md`](./docs/workflow.md) | Complete Mermaid state diagram and state transition table |
+| [`references/`](./references) | On-demand reference docs: full per-phase procedures (phase-1..8), observability, testing/runbooks, API command reference |
+| [`examples/basic-workflow.md`](./examples/basic-workflow.md) | Step-by-step walkthrough |
 
 ---
 
-## 故障恢复
+## Recovery
 
-### 崩溃后
+### After a Crash
 
 ```bash
-# 加载已保存的状态
+# Load saved state
 cat .orca/workflow-state.json | jq '.current_phase'
 
-# 根据所处阶段恢复
-# （详细恢复步骤见 references/runbooks.md）
+# Recover based on phase
+# (see references/runbooks.md for detailed recovery procedures)
 ```
 
-### 挂起后
+### After Parking
 
 ```bash
-# 每个挂起的 feature 会留下一份清单
+# Each parked feature leaves one manifest
 ls .orca/parked/
 
-# 阅读恢复说明
+# Read recovery instructions
 cat .orca/parked/<feature-slug>.md
 ```
 
 ---
 
-## 许可证
+## License
 
-MIT © 2026 —— 详见 [LICENSE](./LICENSE)。
+MIT © 2026 — See [LICENSE](./LICENSE) for details.
