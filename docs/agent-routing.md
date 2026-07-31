@@ -238,7 +238,7 @@ orca terminal create \
 
 ## 环境变量覆盖
 
-所有偏好均可通过环境变量在运行时覆盖（与 `SKILL.md` routing 配置一一对应）：
+所有偏好均可通过环境变量在运行时覆盖（对应 SKILL.md §4.1 中 `routing.*_agent_type` 的冷启动默认值；SKILL.md §3 仅保留指向本文件的指针）：
 
 ```bash
 # === Agent 选择 ===

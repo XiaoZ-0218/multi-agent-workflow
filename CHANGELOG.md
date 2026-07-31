@@ -5,6 +5,37 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [2.2.2] — 2026-07-31
+
+### 变更
+- **SKILL.md 结构瘦身（纯文档重构，无行为变更）**：§13 Observability &
+  Logging 拆至 `references/observability.md`；§16 Testing & Validation 与
+  §17 Operational Runbooks 拆至 `references/runbooks.md`；§18 API Command
+  Reference 拆至 `references/api-reference.md`。内容原样搬运，SKILL.md 原位
+  保留指向新文件的指针，全仓库相关交叉引用同步重接线。
+- **阶段章节拆分**：§5–§12 八个阶段章节同样拆分为
+  `references/phase-1-gathering.md` … `references/phase-8-cleaning.md`
+  （内容逐字搬运）；SKILL.md 中各阶段节标题保持不变（TOC 锚点不受影响），
+  正文仅保留 3–6 条骨架要点与指向对应 `references/phase-*.md` 的指针。
+- **状态机去重**：SKILL.md §2 的 State Transition Table 与
+  `docs/workflow.md` 的状态流转表重复，SKILL.md 侧表格已删除并改为指针；
+  仅存在于 SKILL.md 侧的转移行（CONFIRMING 强制用户决策、任意状态致命错误
+  终止、父任务失败的子任务跳过）已合并进 `docs/workflow.md`。
+- **路由环境变量去重**：SKILL.md §3.3 的 Agent routing 环境变量
+  （`ORCA_WORKFLOW_*_AGENT`、fallback chain）与 `docs/agent-routing.md`
+  （单一起源）重复，已删除，仅保留指针；limits/paths/behaviour 变量留在
+  原处。
+- **版本对齐**：SKILL.md frontmatter 与 README badge 由 2.2.0 更新为
+  2.2.2（2.2.1 条目此前未同步版本号，属历史漂移，一并修正）。
+- **SKILL.md 最后一轮非操作性内容精简（纯文档重构，无行为变更）**：
+  删除 §1 的 v2.2.0→v2.1.0 迁移对照表（其独有信息——移除的环境变量
+  清单——已补入本文件 [2.2.0] 条目）；§2 ASCII 状态图替换为单行流程
+  加 `docs/workflow.md` 指针（文字说明保留）；§3.1 内联预检 shell 块
+  替换为 `scripts/check-prerequisites.sh` 指针（脚本检查项为其超集，
+  无检查项丢失）；§3.3 环境变量并入 §4.1（每个变量仅一处定义），§3
+  保留一行指针；删除整节目录（TOC）。所有运行规则、循环上限与禁令
+  均未改动。
+
 ## [2.2.1] — 2026-07-27
 
 ### 变更
@@ -72,6 +103,12 @@
   `branch` / `pr_url` 已删除。`current_phase` /
   `current_state` 枚举现在包含 `INIT`，`pr.state` 不再有
   `DRAFT` 取值。
+- **移除不再读取的环境变量**：`ORCA_WORKFLOW_BRANCH_STRATEGY`、
+  `ORCA_WORKFLOW_BRANCH_TEMPLATE`、`ORCA_WORKFLOW_WORKTREE_PATH_TEMPLATE`、
+  `ORCA_WORKFLOW_MAX_TERMINALS_PER_SUBTASK`、
+  `ORCA_WORKFLOW_MIN_WORKERS`（每个 feature 一个 worktree 的模型不需要
+  分支/路径模板，终端数量也不再做预检）；新增
+  `ORCA_WORKFLOW_MAX_INTEGRATION_REVIEW`（默认 2）。
 - **移除缩减范围选项**：v2.0.1 Phase 3 的「缩减范围」路径允许
   并行写入协调者的主 checkout，不安全。用户改用 Revise 来缩减范围。
 
