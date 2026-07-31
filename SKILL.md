@@ -263,7 +263,9 @@ git diff --quiet && git diff --cached --quiet \
 
 ### 3.3 Environment Variables
 
-> Full list and precedence: [`docs/agent-routing.md`](./docs/agent-routing.md).
+> Agent routing variables (`ORCA_WORKFLOW_*_AGENT`, `ORCA_WORKFLOW_FALLBACK_CHAIN`)
+> are defined in [`docs/agent-routing.md`](./docs/agent-routing.md) — the single
+> source of truth for routing, including precedence and the fallback chain.
 
 ```bash
 # === Limits (override workflow.limits.*) ===
@@ -285,16 +287,6 @@ export ORCA_WORKFLOW_LOG_LEVEL="${ORCA_WORKFLOW_LOG_LEVEL:-INFO}"
 # false → WARN and continue (default for local dev and smoke tests)
 export ORCA_WORKFLOW_STRICT_PREREQ="${ORCA_WORKFLOW_STRICT_PREREQ:-false}"
 export ORCA_WORKFLOW_DRY_RUN="${ORCA_WORKFLOW_DRY_RUN:-false}"
-
-# === Agent routing (override docs/agent-routing.md — same names as v2.1.0) ===
-export ORCA_WORKFLOW_PLAN_AGENT="${ORCA_WORKFLOW_PLAN_AGENT:-claude}"   # fallback: pi
-export ORCA_WORKFLOW_REVIEW_AGENT="${ORCA_WORKFLOW_REVIEW_AGENT:-pi}"
-export ORCA_WORKFLOW_EXECUTION_AGENT="${ORCA_WORKFLOW_EXECUTION_AGENT:-kimi}"   # on error: claude (see fallback chain)
-export ORCA_WORKFLOW_COMPLEX_EXECUTION_AGENT="${ORCA_WORKFLOW_COMPLEX_EXECUTION_AGENT:-kimi}"
-export ORCA_WORKFLOW_IMAGE_AGENT="${ORCA_WORKFLOW_IMAGE_AGENT:-grok}"
-export ORCA_WORKFLOW_FALLBACK_AGENT="${ORCA_WORKFLOW_FALLBACK_AGENT:-pi}"
-# Fallback chain after a generic task failure (comma-separated, highest priority first)
-export ORCA_WORKFLOW_FALLBACK_CHAIN="${ORCA_WORKFLOW_FALLBACK_CHAIN:-claude,grok,pi}"
 ```
 
 > **Removed in v2.2.0** (no longer read — the per-feature worktree model needs
